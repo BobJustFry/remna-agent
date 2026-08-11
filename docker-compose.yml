@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-remna}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-remna}
+      POSTGRES_DB: ${POSTGRES_DB:-remna_agent}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-remna} -d ${POSTGRES_DB:-remna_agent}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://remna:remna@db:5432/remna_agent}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8000}:8000"
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    depends_on:
+      - api
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
