@@ -1,22 +1,54 @@
+import asyncio
+import json
+import secrets
+import threading
 import uuid
+from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.deps import require_user
-from app.models import AuthType, Node
+from app.models import AppSetting, AuthType, Hosting, Node
 from app.schemas import (
+    AgentNodeStatus,
     NodeCreate,
     NodeOnlineStatus,
     NodeOut,
+    NodeRebootOut,
     NodeSecretOut,
+    NodesAgentResponse,
     NodesOnlineResponse,
     NodeUpdate,
+    RemnaScriptRunRequest,
+    SshCheckOut,
 )
+from app.services.agent_install import (
+    AGENT_PORT_DEFAULT,
+    AgentInstallCancelled,
+    AgentInstallError,
+    install_agent_via_ssh,
+)
+from app.services.agent_metrics import (
+    clear_agent_status_cache,
+    fetch_agent_status,
+    is_token_mismatch,
+)
+from app.services.agent_token_sync import TokenSyncError, repair_agent_auth_via_ssh
 from app.services.crypto import decrypt_secret, encrypt_secret
 from app.services.ping import check_many
+from app.services.node_reboot import NodeRebootError, reboot_node_via_ssh
+from app.services.remnanode_script import (
+    RemnaScriptError,
+    RemnaScriptParams,
+    run_remnanode_script_via_ssh,
+)
+from app.services.ssh_check import check_ssh_auth
+from app.services.ssh_keys import normalize_private_key
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 
@@ -31,9 +63,14 @@ def _to_out(node: Node) -> NodeOut:
         auth_type=node.auth_type,  # type: ignore[arg-type]
         has_password=bool(node.password_enc),
         has_private_key=bool(node.private_key_enc),
-        provider=node.provider,
+        hosting_id=node.hosting_id,
+        hosting_name=node.hosting.name if node.hosting else None,
+        hosting_website_url=node.hosting.website_url if node.hosting else None,
+        hosting_favicon_data=node.hosting.favicon_data if node.hosting else None,
         country_code=node.country_code,
         notes=node.notes,
+        agent_configured=bool(node.agent_token_enc),
+        agent_port=node.agent_port or AGENT_PORT_DEFAULT,
         created_at=node.created_at,
         updated_at=node.updated_at,
     )
@@ -50,12 +87,32 @@ def _validate_secrets(auth_type: str, password: str | None, private_key: str | N
         raise HTTPException(status_code=400, detail="Неизвестный auth_type")
 
 
+async def _ensure_hosting(db: AsyncSession, hosting_id: uuid.UUID | None) -> None:
+    if hosting_id is None:
+        return
+    hosting = await db.get(Hosting, hosting_id)
+    if not hosting:
+        raise HTTPException(status_code=400, detail="Хостинг не найден")
+
+
+async def _get_node(db: AsyncSession, node_id: uuid.UUID) -> Node:
+    result = await db.execute(
+        select(Node).options(selectinload(Node.hosting)).where(Node.id == node_id)
+    )
+    node = result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+    return node
+
+
 @router.get("", response_model=list[NodeOut])
 async def list_nodes(
     _: str = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[NodeOut]:
-    result = await db.execute(select(Node).order_by(Node.name.asc()))
+    result = await db.execute(
+        select(Node).options(selectinload(Node.hosting)).order_by(Node.name.asc())
+    )
     nodes = result.scalars().all()
     return [_to_out(n) for n in nodes]
 
@@ -80,6 +137,98 @@ async def nodes_online(
     return NodesOnlineResponse(statuses=statuses)
 
 
+# Avoid hammering SSH when token stays broken (seconds).
+_TOKEN_SYNC_COOLDOWN_SEC = 60.0
+_token_sync_last_try: dict[str, float] = {}
+
+
+@router.get("/agents", response_model=NodesAgentResponse)
+async def nodes_agents(
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> NodesAgentResponse:
+    result = await db.execute(select(Node))
+    nodes = list(result.scalars().all())
+
+    async def one(node: Node) -> tuple[str, AgentNodeStatus]:
+        node_id = str(node.id)
+        token = decrypt_secret(node.agent_token_enc) if node.agent_token_enc else None
+        st = await fetch_agent_status(
+            host=node.host,
+            token=token,
+            agent_port=node.agent_port,
+            node_id=node_id,
+        )
+
+        if is_token_mismatch(st):
+            now = asyncio.get_running_loop().time()
+            last = _token_sync_last_try.get(node_id, 0.0)
+            if now - last >= _TOKEN_SYNC_COOLDOWN_SEC:
+                _token_sync_last_try[node_id] = now
+                password = decrypt_secret(node.password_enc) if node.password_enc else None
+                private_key = (
+                    decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+                )
+                try:
+                    remote_token = await asyncio.to_thread(
+                        repair_agent_auth_via_ssh,
+                        host=node.host,
+                        ssh_port=node.ssh_port,
+                        username=node.ssh_user,
+                        auth_type=node.auth_type,
+                        password=password,
+                        private_key=private_key,
+                        agent_port=node.agent_port or AGENT_PORT_DEFAULT,
+                    )
+                    # Own session — gather() must not commit the shared request session.
+                    async with SessionLocal() as sync_db:
+                        row = await sync_db.get(Node, node.id)
+                        if row:
+                            row.agent_token_enc = encrypt_secret(remote_token)
+                            await sync_db.commit()
+                    clear_agent_status_cache(node_id)
+                    st = await fetch_agent_status(
+                        host=node.host,
+                        token=remote_token,
+                        agent_port=node.agent_port,
+                        node_id=node_id,
+                    )
+                    if is_token_mismatch(st):
+                        st.error = (
+                            "Токен с VPS прочитан и агент перезапущен, но /metrics "
+                            "всё ещё отклоняет запрос — переустановите агент"
+                        )
+                except TokenSyncError as exc:
+                    st.error = (
+                        f"Токен не совпадает; автосинхронизация по SSH не удалась: {exc.message}"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.error = (
+                        f"Токен не совпадает; автосинхронизация по SSH не удалась: {exc}"
+                    )
+
+        return node_id, AgentNodeStatus(
+            present=st.present,
+            configured=st.configured,
+            version=st.version,
+            remnanode_version=st.remnanode_version,
+            remnanode_running=st.remnanode_running,
+            cpu_percent=st.cpu_percent,
+            mem_percent=st.mem_percent,
+            disk_percent=st.disk_percent,
+            loadavg=st.loadavg,
+            error=st.error,
+        )
+
+    pairs = await asyncio.gather(*(one(n) for n in nodes))
+    from app.services.agent_version import get_bundled_agent_version
+
+    return NodesAgentResponse(
+        statuses=dict(pairs),
+        latest_agent_version=get_bundled_agent_version(),
+    )
+
+
 @router.post("", response_model=NodeOut, status_code=status.HTTP_201_CREATED)
 async def create_node(
     body: NodeCreate,
@@ -87,6 +236,11 @@ async def create_node(
     db: AsyncSession = Depends(get_db),
 ) -> NodeOut:
     _validate_secrets(body.auth_type, body.password, body.private_key, required=True)
+    await _ensure_hosting(db, body.hosting_id)
+    private_key_enc = None
+    if body.private_key:
+        normalized = normalize_private_key(body.private_key, body.private_key_passphrase)
+        private_key_enc = encrypt_secret(normalized)
     node = Node(
         name=body.name.strip(),
         host=body.host.strip(),
@@ -94,15 +248,14 @@ async def create_node(
         ssh_user=body.ssh_user.strip(),
         auth_type=body.auth_type,
         password_enc=encrypt_secret(body.password) if body.password else None,
-        private_key_enc=encrypt_secret(body.private_key) if body.private_key else None,
-        provider=body.provider.strip() if body.provider else None,
+        private_key_enc=private_key_enc,
+        hosting_id=body.hosting_id,
         country_code=body.country_code.upper().strip() if body.country_code else None,
         notes=body.notes,
     )
     db.add(node)
     await db.commit()
-    await db.refresh(node)
-    return _to_out(node)
+    return _to_out(await _get_node(db, node.id))
 
 
 @router.get("/{node_id}", response_model=NodeOut)
@@ -111,10 +264,7 @@ async def get_node(
     _: str = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> NodeOut:
-    node = await db.get(Node, node_id)
-    if not node:
-        raise HTTPException(status_code=404, detail="Нода не найдена")
-    return _to_out(node)
+    return _to_out(await _get_node(db, node_id))
 
 
 @router.patch("/{node_id}", response_model=NodeOut)
@@ -141,22 +291,32 @@ async def update_node(
         node.ssh_user = data["ssh_user"].strip()
     if "auth_type" in data and data["auth_type"] is not None:
         node.auth_type = data["auth_type"]
-    if "provider" in data:
-        node.provider = data["provider"].strip() if data["provider"] else None
+    if body.clear_hosting:
+        node.hosting_id = None
+    elif "hosting_id" in data:
+        await _ensure_hosting(db, data["hosting_id"])
+        node.hosting_id = data["hosting_id"]
     if "country_code" in data:
         node.country_code = data["country_code"].upper().strip() if data["country_code"] else None
     if "notes" in data:
         node.notes = data["notes"]
 
+    # Secrets: empty / omitted fields must NOT wipe stored credentials.
+    # Clear only via explicit clear_password / clear_private_key.
     if body.clear_password:
         node.password_enc = None
-    elif body.password:
-        node.password_enc = encrypt_secret(body.password)
+    elif "password" in data:
+        pw = data["password"]
+        if isinstance(pw, str) and pw.strip():
+            node.password_enc = encrypt_secret(pw)
 
     if body.clear_private_key:
         node.private_key_enc = None
-    elif body.private_key:
-        node.private_key_enc = encrypt_secret(body.private_key)
+    elif "private_key" in data:
+        key = data["private_key"]
+        if isinstance(key, str) and key.strip():
+            normalized = normalize_private_key(key, body.private_key_passphrase)
+            node.private_key_enc = encrypt_secret(normalized)
 
     if auth_type == AuthType.password.value and not node.password_enc:
         raise HTTPException(status_code=400, detail="Для типа password нужен пароль")
@@ -164,8 +324,7 @@ async def update_node(
         raise HTTPException(status_code=400, detail="Для типа private_key нужен приватный ключ")
 
     await db.commit()
-    await db.refresh(node)
-    return _to_out(node)
+    return _to_out(await _get_node(db, node_id))
 
 
 @router.delete("/{node_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -199,3 +358,336 @@ async def get_node_secret(
     if not node.private_key_enc:
         raise HTTPException(status_code=404, detail="Ключ не задан")
     return NodeSecretOut(auth_type="private_key", secret=decrypt_secret(node.private_key_enc))
+
+
+@router.post("/{node_id}/ssh-check", response_model=SshCheckOut)
+async def ssh_check_node(
+    node_id: uuid.UUID,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> SshCheckOut:
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+
+    result = await asyncio.to_thread(
+        check_ssh_auth,
+        host=node.host,
+        port=node.ssh_port,
+        username=node.ssh_user,
+        auth_type=node.auth_type,
+        password=password,
+        private_key=private_key,
+    )
+    return SshCheckOut(ok=result.ok, message=result.message)
+
+
+@router.post("/{node_id}/reboot", response_model=NodeRebootOut)
+async def reboot_node(
+    node_id: uuid.UUID,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> NodeRebootOut:
+    """SSH reboot (systemctl reboot / reboot / shutdown -r now)."""
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+
+    try:
+        result = await asyncio.to_thread(
+            reboot_node_via_ssh,
+            host=node.host,
+            ssh_port=node.ssh_port,
+            username=node.ssh_user,
+            auth_type=node.auth_type,
+            password=password,
+            private_key=private_key,
+        )
+    except NodeRebootError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+
+    return NodeRebootOut(ok=result.ok, message=result.message)
+
+
+async def _persist_agent_credentials(
+    node_id: uuid.UUID,
+    *,
+    token: str,
+    agent_port: int,
+    ssh_user: str | None = None,
+) -> NodeOut:
+    """Own session — request-scoped db may be closed during StreamingResponse."""
+    async with SessionLocal() as session:
+        node = await session.get(Node, node_id)
+        if not node:
+            raise RuntimeError("Нода не найдена при сохранении токена агента")
+        node.agent_token_enc = encrypt_secret(token)
+        node.agent_port = agent_port
+        if ssh_user and ssh_user != node.ssh_user:
+            node.ssh_user = ssh_user
+        await session.commit()
+        return _to_out(await _get_node(session, node_id))
+
+
+@router.post("/{node_id}/agent/install")
+async def install_node_agent(
+    node_id: uuid.UUID,
+    install_deps: bool = Query(
+        False,
+        description="If true, install missing runtime deps (python3) via package manager",
+    ),
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """NDJSON stream: {type:log|done|error, ...} — live VPS install output."""
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+    token = secrets.token_urlsafe(32)
+    agent_port = node.agent_port or AGENT_PORT_DEFAULT
+    host = node.host
+    ssh_port = node.ssh_port
+    username = node.ssh_user
+    auth_type = node.auth_type
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        cancel = threading.Event()
+
+        def worker() -> None:
+            try:
+                resolved: list[str] = []
+                for line in install_agent_via_ssh(
+                    host=host,
+                    ssh_port=ssh_port,
+                    username=username,
+                    auth_type=auth_type,
+                    password=password,
+                    private_key=private_key,
+                    token=token,
+                    agent_port=agent_port,
+                    install_deps=install_deps,
+                    resolved_username=resolved,
+                    cancel=cancel,
+                ):
+                    if cancel.is_set():
+                        raise AgentInstallCancelled()
+                    loop.call_soon_threadsafe(queue.put_nowait, {"type": "log", "line": line})
+                if cancel.is_set():
+                    raise AgentInstallCancelled()
+                # Persist before client disconnects — token must match VPS env.
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        _persist_agent_credentials(
+                            node_id,
+                            token=token,
+                            agent_port=agent_port,
+                            ssh_user=resolved[0] if resolved else None,
+                        ),
+                        loop,
+                    )
+                    node_out = fut.result(timeout=60)
+                    if cancel.is_set():
+                        raise AgentInstallCancelled()
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait,
+                        {
+                            "type": "done",
+                            "ok": True,
+                            "message": f"Агент установлен и запущен на порту {agent_port}",
+                            "agent_port": agent_port,
+                            "node": node_out.model_dump(mode="json"),
+                        },
+                    )
+                except AgentInstallCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait,
+                        {
+                            "type": "error",
+                            "message": (
+                                f"Агент на ноде запущен, но токен не сохранён в панели: {exc}. "
+                                "Переустановите агент."
+                            ),
+                        },
+                    )
+            except AgentInstallCancelled:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": AgentInstallCancelled.message},
+                )
+            except AgentInstallError as exc:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": exc.message},
+                )
+            except Exception as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": str(exc) or "Неизвестная ошибка установки"},
+                )
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        task = asyncio.create_task(asyncio.to_thread(worker))
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8")
+        except (asyncio.CancelledError, GeneratorExit):
+            cancel.set()
+            raise
+        finally:
+            cancel.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=8)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/{node_id}/scripts/run")
+async def run_node_script(
+    node_id: uuid.UUID,
+    body: RemnaScriptRunRequest,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """NDJSON stream for RemnaNode install/reinstall/tune scripts."""
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+
+    secret_key = (body.secret_key or "").strip()
+    if body.action in ("install", "reinstall") and not secret_key:
+        row = await db.get(AppSetting, "remna_secret_key")
+        if row and row.value_enc:
+            secret_key = decrypt_secret(row.value_enc)
+    if body.action in ("install", "reinstall") and not secret_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Укажите SECRET_KEY в форме или сохраните его в настройках панели",
+        )
+
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+    host = node.host
+    ssh_port = node.ssh_port
+    username = node.ssh_user
+    auth_type = node.auth_type
+
+    params = RemnaScriptParams(
+        action=body.action,
+        node_port=body.node_port,
+        secret_key=secret_key,
+        additional_ports=body.additional_ports or "",
+        mtu_ddos=body.mtu_ddos,
+        gaming=body.gaming,
+        swap=body.swap,
+        swap_size=body.swap_size or "1G",
+        cache_size=body.cache_size or "1G",
+        disable_ipv6=body.disable_ipv6,
+        use_origin=body.use_origin,
+        origin_domain=(body.origin_domain or "").strip(),
+        tune_mtu=body.tune_mtu,
+        tune_gaming=body.tune_gaming,
+        tune_swap=body.tune_swap,
+        tune_ports=body.tune_ports,
+        tune_ipv6=body.tune_ipv6,
+        skip_system_update=body.skip_system_update,
+    )
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        cancel = threading.Event()
+
+        def worker() -> None:
+            try:
+                for line in run_remnanode_script_via_ssh(
+                    host=host,
+                    ssh_port=ssh_port,
+                    username=username,
+                    auth_type=auth_type,
+                    password=password,
+                    private_key=private_key,
+                    params=params,
+                    cancel=cancel,
+                ):
+                    if cancel.is_set():
+                        raise AgentInstallCancelled()
+                    loop.call_soon_threadsafe(queue.put_nowait, {"type": "log", "line": line})
+                if cancel.is_set():
+                    raise AgentInstallCancelled()
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {
+                        "type": "done",
+                        "ok": True,
+                        "message": f"Скрипт «{body.action}» выполнен на {host}",
+                    },
+                )
+            except AgentInstallCancelled:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": AgentInstallCancelled.message},
+                )
+            except RemnaScriptError as exc:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": exc.message},
+                )
+            except Exception as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": str(exc) or "Ошибка скрипта"},
+                )
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        task = asyncio.create_task(asyncio.to_thread(worker))
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8")
+        except (asyncio.CancelledError, GeneratorExit):
+            cancel.set()
+            raise
+        finally:
+            cancel.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=8)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

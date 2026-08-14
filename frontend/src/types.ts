@@ -1,5 +1,15 @@
 export type AuthType = "password" | "private_key";
 
+export type HostingItem = {
+  id: string;
+  name: string;
+  website_url: string | null;
+  favicon_data: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type NodeItem = {
   id: string;
   name: string;
@@ -9,12 +19,32 @@ export type NodeItem = {
   auth_type: AuthType;
   has_password: boolean;
   has_private_key: boolean;
-  provider: string | null;
+  hosting_id: string | null;
+  hosting_name: string | null;
+  hosting_website_url: string | null;
+  hosting_favicon_data: string | null;
   country_code: string | null;
   notes: string | null;
+  agent_configured: boolean;
+  agent_port: number;
   created_at: string;
   updated_at: string;
 };
+
+export type AgentStatus = {
+  present: boolean;
+  configured: boolean;
+  version: string | null;
+  remnanode_version: string | null;
+  remnanode_running: boolean | null;
+  cpu_percent: number | null;
+  mem_percent: number | null;
+  disk_percent: number | null;
+  loadavg: number[] | null;
+  error: string | null;
+};
+
+export type AgentMap = Record<string, AgentStatus>;
 
 export type NodeFormValues = {
   name: string;
@@ -24,7 +54,8 @@ export type NodeFormValues = {
   auth_type: AuthType;
   password: string;
   private_key: string;
-  provider: string;
+  private_key_passphrase: string;
+  hosting_id: string;
   country_code: string;
   notes: string;
 };
@@ -36,3 +67,8 @@ export type OnlineStatus = {
 };
 
 export type OnlineMap = Record<string, OnlineStatus>;
+
+export type SshCheckResult = {
+  ok: boolean;
+  message: string;
+};

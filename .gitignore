@@ -18,3 +18,5 @@ frontend/dist/
 backend/.pytest_cache/
 *.egg-info/
 .docker-data/
+data/postgres/
+data/backups/

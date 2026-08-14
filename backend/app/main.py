@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, nodes
+from app.api import auth, hostings, nodes, remnawave, settings as settings_api
 from app.config import settings
 
 app = FastAPI(title="Remna Agent", version="0.1.0")
@@ -16,7 +16,10 @@ app.add_middleware(
 )
 
 app.include_router(auth.router, prefix="/api")
+app.include_router(hostings.router, prefix="/api")
 app.include_router(nodes.router, prefix="/api")
+app.include_router(settings_api.router, prefix="/api")
+app.include_router(remnawave.router, prefix="/api")
 
 
 @app.get("/api/health")

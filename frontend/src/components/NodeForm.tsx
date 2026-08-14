@@ -1,13 +1,19 @@
-import { useEffect, useState, type ReactNode } from "react";
-import type { NodeFormValues, NodeItem } from "../types";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import { api } from "../api/client";
+import { COUNTRIES } from "../lib/countries";
+import type { HostingItem, NodeFormValues, NodeItem } from "../types";
+import { CountryFlag } from "./CountryFlag";
+import { HostingLogo } from "./HostingLogo";
 
 type Props = {
   open: boolean;
   initial?: NodeItem | null;
+  hostings: HostingItem[];
   busy?: boolean;
   error?: string | null;
   onClose: () => void;
   onSubmit: (values: NodeFormValues) => Promise<void>;
+  onHostingsChange: () => Promise<void>;
 };
 
 const empty: NodeFormValues = {
@@ -18,17 +24,46 @@ const empty: NodeFormValues = {
   auth_type: "password",
   password: "",
   private_key: "",
-  provider: "",
+  private_key_passphrase: "",
+  hosting_id: "",
   country_code: "",
   notes: "",
 };
 
-export function NodeForm({ open, initial, busy, error, onClose, onSubmit }: Props) {
-  const [values, setValues] = useState<NodeFormValues>(empty);
-  const editing = Boolean(initial);
+const NEW_HOSTING = "__new__";
 
+export function NodeForm({
+  open,
+  initial,
+  hostings,
+  busy,
+  error,
+  onClose,
+  onSubmit,
+  onHostingsChange,
+}: Props) {
+  const [values, setValues] = useState<NodeFormValues>(empty);
+  const [keyFileName, setKeyFileName] = useState<string | null>(null);
+  const [hostingMode, setHostingMode] = useState<"pick" | "new">("pick");
+  const [newHostingName, setNewHostingName] = useState("");
+  const [newHostingUrl, setNewHostingUrl] = useState("");
+  const [hostingBusy, setHostingBusy] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const editing = Boolean(initial);
+  const editId = initial?.id ?? null;
+  const hasStoredPassword = Boolean(initial?.has_password);
+  const hasStoredKey = Boolean(initial?.has_private_key);
+
+  // Reset only when dialog opens / switches node — NOT on every nodes poll refresh
+  // (otherwise password/key fields get wiped while the user is editing).
   useEffect(() => {
     if (!open) return;
+    setKeyFileName(null);
+    setHostingMode("pick");
+    setNewHostingName("");
+    setNewHostingUrl("");
+    setLocalError(null);
     if (initial) {
       setValues({
         name: initial.name,
@@ -38,14 +73,21 @@ export function NodeForm({ open, initial, busy, error, onClose, onSubmit }: Prop
         auth_type: initial.auth_type,
         password: "",
         private_key: "",
-        provider: initial.provider ?? "",
+        private_key_passphrase: "",
+        hosting_id: initial.hosting_id ?? "",
         country_code: initial.country_code ?? "",
         notes: initial.notes ?? "",
       });
     } else {
       setValues(empty);
     }
-  }, [open, initial]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only open/editId
+  }, [open, editId]);
+
+  const selectedHosting = useMemo(
+    () => hostings.find((h) => h.id === values.hosting_id) ?? null,
+    [hostings, values.hosting_id],
+  );
 
   if (!open) return null;
 
@@ -53,10 +95,49 @@ export function NodeForm({ open, initial, busy, error, onClose, onSubmit }: Prop
     setValues((prev) => ({ ...prev, [key]: value }));
   }
 
+  async function onKeyFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    set("private_key", text);
+    set("auth_type", "private_key");
+    setKeyFileName(file.name);
+    e.target.value = "";
+  }
+
+  async function ensureHostingId(): Promise<string> {
+    if (hostingMode !== "new") {
+      return values.hosting_id;
+    }
+    const name = newHostingName.trim();
+    if (!name) {
+      throw new Error("Укажите название хостинга");
+    }
+    setHostingBusy(true);
+    try {
+      const created = await api.createHosting({
+        name,
+        website_url: newHostingUrl.trim() || null,
+      });
+      await onHostingsChange();
+      setHostingMode("pick");
+      set("hosting_id", created.id);
+      setNewHostingName("");
+      setNewHostingUrl("");
+      return created.id;
+    } finally {
+      setHostingBusy(false);
+    }
+  }
+
+  const isPpk =
+    values.private_key.trimStart().startsWith("PuTTY-User-Key-File-") ||
+    (keyFileName?.toLowerCase().endsWith(".ppk") ?? false);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm">
-      <div className="w-full max-w-xl rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] shadow-2xl">
-        <div className="flex items-center justify-between border-b border-[var(--border)] px-5 py-4">
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 backdrop-blur-sm sm:items-center sm:p-4">
+      <div className="flex max-h-[min(100dvh,920px)] w-full max-w-xl flex-col rounded-t-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] shadow-2xl sm:rounded-[var(--radius)]">
+        <div className="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-4 py-4 sm:px-5">
           <h2 className="text-base font-semibold">{editing ? "Редактировать ноду" : "Добавить ноду"}</h2>
           <button type="button" onClick={onClose} className="text-[var(--muted)] hover:text-[var(--text)]">
             ✕
@@ -64,22 +145,87 @@ export function NodeForm({ open, initial, busy, error, onClose, onSubmit }: Prop
         </div>
 
         <form
-          className="grid gap-3 px-5 py-4"
+          className="grid flex-1 gap-3 overflow-y-auto px-4 py-4 sm:px-5"
           onSubmit={(e) => {
             e.preventDefault();
-            void onSubmit(values);
+            setLocalError(null);
+            void (async () => {
+              try {
+                const hostingId = await ensureHostingId();
+                await onSubmit({ ...values, hosting_id: hostingId });
+              } catch (err) {
+                setLocalError(err instanceof Error ? err.message : "Ошибка");
+              }
+            })();
           }}
         >
           <div className="grid grid-cols-2 gap-3">
             <Field label="Название">
               <input required value={values.name} onChange={(e) => set("name", e.target.value)} className={inputCls} />
             </Field>
-            <Field label="Провайдер">
-              <input value={values.provider} onChange={(e) => set("provider", e.target.value)} className={inputCls} />
-            </Field>
+            <div className="grid gap-1.5 text-xs text-[var(--muted)]">
+              <span>Хостинг</span>
+              {hostingMode === "pick" ? (
+                <div className="flex items-center gap-2">
+                  {selectedHosting && (
+                    <HostingLogo
+                      name={selectedHosting.name}
+                      faviconData={selectedHosting.favicon_data}
+                      size={22}
+                    />
+                  )}
+                  <select
+                    value={values.hosting_id}
+                    onChange={(e) => {
+                      if (e.target.value === NEW_HOSTING) {
+                        setHostingMode("new");
+                        return;
+                      }
+                      set("hosting_id", e.target.value);
+                    }}
+                    className={inputCls}
+                  >
+                    <option value="">— не выбран —</option>
+                    {hostings.map((h) => (
+                      <option key={h.id} value={h.id}>
+                        {h.name}
+                      </option>
+                    ))}
+                    <option value={NEW_HOSTING}>＋ Добавить хостинг…</option>
+                  </select>
+                </div>
+              ) : (
+                <div className="grid gap-2">
+                  <input
+                    autoFocus
+                    placeholder="Название хостинга"
+                    value={newHostingName}
+                    onChange={(e) => setNewHostingName(e.target.value)}
+                    className={inputCls}
+                  />
+                  <input
+                    placeholder="https://сайт-хостинга (опционально)"
+                    value={newHostingUrl}
+                    onChange={(e) => setNewHostingUrl(e.target.value)}
+                    className={inputCls}
+                  />
+                  <button
+                    type="button"
+                    className={`${btnGhost} justify-self-start`}
+                    onClick={() => {
+                      setHostingMode("pick");
+                      setNewHostingName("");
+                      setNewHostingUrl("");
+                    }}
+                  >
+                    Отмена
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
-          <div className="grid grid-cols-[1fr_100px_90px] gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_100px_minmax(140px,1fr)]">
             <Field label="Host / IP">
               <input required value={values.host} onChange={(e) => set("host", e.target.value)} className={inputCls} />
             </Field>
@@ -94,17 +240,30 @@ export function NodeForm({ open, initial, busy, error, onClose, onSubmit }: Prop
               />
             </Field>
             <Field label="Страна">
-              <input
-                maxLength={2}
-                placeholder="DE"
-                value={values.country_code}
-                onChange={(e) => set("country_code", e.target.value.toUpperCase())}
-                className={inputCls}
-              />
+              <div className="flex items-center gap-2">
+                {values.country_code && <CountryFlag code={values.country_code} size={16} />}
+                <select
+                  value={values.country_code}
+                  onChange={(e) => set("country_code", e.target.value)}
+                  className={`${inputCls} min-w-0 flex-1`}
+                >
+                  <option value="">— не указана —</option>
+                  {COUNTRIES.map((c) => (
+                    <option key={c.code} value={c.code}>
+                      {c.name}
+                    </option>
+                  ))}
+                  {/* keep unknown legacy code selectable until changed */}
+                  {values.country_code &&
+                    !COUNTRIES.some((c) => c.code === values.country_code) && (
+                      <option value={values.country_code}>{values.country_code}</option>
+                    )}
+                </select>
+              </div>
             </Field>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field label="SSH user">
               <input value={values.ssh_user} onChange={(e) => set("ssh_user", e.target.value)} className={inputCls} />
             </Field>
@@ -121,40 +280,106 @@ export function NodeForm({ open, initial, busy, error, onClose, onSubmit }: Prop
           </div>
 
           {values.auth_type === "password" ? (
-            <Field label={editing ? "Пароль (оставьте пустым, чтобы не менять)" : "Пароль"}>
+            <Field label={editing ? "Пароль (пусто = не менять)" : "Пароль"}>
+              {editing && hasStoredPassword && (
+                <p className="mb-1 text-[11px] text-[var(--success)]">Пароль сохранён в панели — пустое поле его не удалит.</p>
+              )}
               <input
                 type="password"
+                name="node-ssh-password"
                 required={!editing}
                 value={values.password}
                 onChange={(e) => set("password", e.target.value)}
                 className={inputCls}
-                autoComplete="new-password"
+                autoComplete="off"
+                placeholder={editing && hasStoredPassword ? "••••••••" : undefined}
               />
             </Field>
           ) : (
-            <Field label={editing ? "Приватный ключ (оставьте пустым, чтобы не менять)" : "Приватный ключ"}>
-              <textarea
-                required={!editing}
-                rows={5}
-                value={values.private_key}
-                onChange={(e) => set("private_key", e.target.value)}
-                className={`${inputCls} font-mono text-xs`}
-              />
-            </Field>
+            <div className="grid gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept=".ppk,.pem,.key,.txt,application/x-pem-file,text/plain"
+                  className="hidden"
+                  onChange={(e) => void onKeyFile(e)}
+                />
+                <button type="button" className={btnGhost} onClick={() => fileRef.current?.click()}>
+                  Загрузить ключ (.ppk / OpenSSH)
+                </button>
+                {keyFileName && <span className="text-xs text-[var(--accent)]">{keyFileName}</span>}
+                {editing && hasStoredKey && !values.private_key && !keyFileName && (
+                  <span className="text-xs text-[var(--success)]">Ключ сохранён в панели</span>
+                )}
+              </div>
+              <p className="text-[11px] text-[var(--muted)]">
+                PuTTY `.ppk` конвертируется на сервере в OpenSSH. При редактировании пустое поле ключ не удаляет.
+              </p>
+              <Field label={editing ? "Приватный ключ (пусто = не менять)" : "Приватный ключ"}>
+                <textarea
+                  required={!editing}
+                  name="node-ssh-private-key"
+                  rows={5}
+                  value={values.private_key}
+                  onChange={(e) => {
+                    set("private_key", e.target.value);
+                    setKeyFileName(null);
+                  }}
+                  className={`${inputCls} font-mono text-xs`}
+                  placeholder={
+                    editing && hasStoredKey
+                      ? "Ключ уже сохранён — вставьте новый, только если хотите заменить"
+                      : "-----BEGIN ... PRIVATE KEY----- или содержимое .ppk"
+                  }
+                  autoComplete="off"
+                />
+              </Field>
+              {editing && hasStoredPassword && (
+                <Field label="Пароль для sudo (пусто = не менять)">
+                  <p className="mb-1 text-[11px] text-[var(--success)]">Пароль сохранён — используется для sudo при установке агента.</p>
+                  <input
+                    type="password"
+                    name="node-ssh-sudo-password"
+                    value={values.password}
+                    onChange={(e) => set("password", e.target.value)}
+                    className={inputCls}
+                    autoComplete="off"
+                    placeholder="••••••••"
+                  />
+                </Field>
+              )}
+              {isPpk && (
+                <Field label="Passphrase PPK (если ключ с паролем)">
+                  <input
+                    type="password"
+                    name="node-ssh-ppk-passphrase"
+                    value={values.private_key_passphrase}
+                    onChange={(e) => set("private_key_passphrase", e.target.value)}
+                    className={inputCls}
+                    autoComplete="off"
+                  />
+                </Field>
+              )}
+            </div>
           )}
 
           <Field label="Заметки">
             <textarea rows={2} value={values.notes} onChange={(e) => set("notes", e.target.value)} className={inputCls} />
           </Field>
 
-          {error && <div className="rounded-md border border-[rgba(240,113,120,0.35)] bg-[rgba(240,113,120,0.08)] px-3 py-2 text-sm text-[var(--danger)]">{error}</div>}
+          {(error || localError) && (
+            <div className="rounded-md border border-[rgba(240,113,120,0.35)] bg-[rgba(240,113,120,0.08)] px-3 py-2 text-sm text-[var(--danger)]">
+              {localError || error}
+            </div>
+          )}
 
           <div className="flex justify-end gap-2 pt-2">
             <button type="button" onClick={onClose} className={btnGhost}>
               Отмена
             </button>
-            <button type="submit" disabled={busy} className={btnPrimary}>
-              {busy ? "Сохранение…" : "Сохранить"}
+            <button type="submit" disabled={busy || hostingBusy} className={btnPrimary}>
+              {busy || hostingBusy ? "Сохранение…" : "Сохранить"}
             </button>
           </div>
         </form>

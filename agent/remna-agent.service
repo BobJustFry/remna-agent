@@ -1,0 +1,14 @@
+[Unit]
+Description=Remna Node Agent
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/remna-agent.env
+ExecStart=/usr/bin/python3 /opt/remna-agent/remna_node_agent.py
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
