@@ -822,6 +822,45 @@ configure_bbr_basic() {
     $SUDO_CMD sysctl -p >/dev/null 2>&1 || true
 }
 
+configure_conntrack_limits() {
+    local sysctl_file="/etc/sysctl.d/99-remnanode-conntrack.conf"
+    local modprobe_file="/etc/modprobe.d/nf_conntrack.conf"
+    local unit="/etc/systemd/system/remnanode-conntrack.service"
+
+    echo "→ nf_conntrack limits…"
+    $SUDO_CMD modprobe nf_conntrack >/dev/null 2>&1 || true
+    $SUDO_CMD sysctl -w net.netfilter.nf_conntrack_max=65536 >/dev/null 2>&1 || true
+    $SUDO_CMD sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=7200 >/dev/null 2>&1 || true
+    $SUDO_CMD sysctl -w net.netfilter.nf_conntrack_tcp_timeout_time_wait=30 >/dev/null 2>&1 || true
+    if [ -e /sys/module/nf_conntrack/parameters/hashsize ]; then
+        echo 16384 | $SUDO_CMD tee /sys/module/nf_conntrack/parameters/hashsize >/dev/null 2>&1 || true
+    fi
+    $SUDO_CMD tee "$sysctl_file" >/dev/null <<'EOF'
+net.netfilter.nf_conntrack_max = 65536
+net.netfilter.nf_conntrack_tcp_timeout_established = 7200
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+EOF
+    $SUDO_CMD sysctl -p "$sysctl_file" >/dev/null 2>&1 || true
+    echo "options nf_conntrack hashsize=16384" | $SUDO_CMD tee "$modprobe_file" >/dev/null
+    $SUDO_CMD tee "$unit" >/dev/null <<'EOF'
+[Unit]
+Description=RemnaNode nf_conntrack hashsize
+After=network-pre.target
+DefaultDependencies=no
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'modprobe nf_conntrack 2>/dev/null || true; if [ -e /sys/module/nf_conntrack/parameters/hashsize ]; then echo 16384 > /sys/module/nf_conntrack/parameters/hashsize; fi'
+RemainAfterExit=yes
+TimeoutStartSec=10
+[Install]
+WantedBy=multi-user.target
+EOF
+    $SUDO_CMD systemctl daemon-reload >/dev/null 2>&1 || true
+    $SUDO_CMD systemctl enable remnanode-conntrack.service >/dev/null 2>&1 || true
+    $SUDO_CMD systemctl start remnanode-conntrack.service >/dev/null 2>&1 || true
+    echo "✓ nf_conntrack max=65536 hashsize=16384"
+}
+
 configure_gaming_node() {
     local iface
     local sysctl_file="/etc/sysctl.d/99-remnanode-gaming.conf"
@@ -1704,6 +1743,8 @@ if $reconfigure_only; then
 fi
 
 apply_ipv6_choice
+
+configure_conntrack_limits
 
 if $gaming_node; then
     configure_gaming_node

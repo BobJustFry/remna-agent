@@ -16,6 +16,18 @@ from app.deps import require_user
 from app.models import AppSetting, AuthType, Hosting, Node
 from app.schemas import (
     AgentNodeStatus,
+    DestLoopbackRequest,
+    DestScanRequest,
+    HaproxyDiagOut,
+    HaproxyHistoryPointOut,
+    HaproxyLiveStatsOut,
+    HaproxyParsedOut,
+    HaproxyPreviewOut,
+    HaproxyPreviewRequest,
+    HaproxyRunRequest,
+    HaproxySessionOut,
+    HaproxyStatRowOut,
+    HaproxyStatusOut,
     NodeCreate,
     NodeOnlineStatus,
     NodeOut,
@@ -26,6 +38,8 @@ from app.schemas import (
     NodeUpdate,
     RemnaScriptRunRequest,
     SshCheckOut,
+    VpsCapacityOut,
+    WarpInstallRequest,
 )
 from app.services.agent_install import (
     AGENT_PORT_DEFAULT,
@@ -48,7 +62,20 @@ from app.services.remnanode_script import (
     run_remnanode_script_via_ssh,
 )
 from app.services.ssh_check import check_ssh_auth
+from app.services.haproxy_script import (
+    HaproxyParams,
+    HaproxyRoute,
+    HaproxyScriptError,
+    fetch_haproxy_diag,
+    fetch_haproxy_status,
+    render_haproxy_cfg,
+    run_haproxy_script_via_ssh,
+)
+from app.services.haproxy_stats import fetch_haproxy_stats
+from app.services.vps_capacity import fetch_vps_capacity
+from app.services.warp_script import WarpScriptError, run_warp_script_via_ssh
 from app.services.ssh_keys import normalize_private_key
+from app.services.dest_pick import DestPickError, run_dest_loopback, run_dest_scan
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 
@@ -213,6 +240,19 @@ async def nodes_agents(
             version=st.version,
             remnanode_version=st.remnanode_version,
             remnanode_running=st.remnanode_running,
+            warp_present=st.warp_present,
+            warp_up=st.warp_up,
+            warp_healthy=st.warp_healthy,
+            warp_handshake_sec=st.warp_handshake_sec,
+            warp_egress_ok=st.warp_egress_ok,
+            warp_interface=st.warp_interface,
+            warp_method=st.warp_method,
+            warp_version=st.warp_version,
+            warp_ipv4=st.warp_ipv4,
+            haproxy_present=st.haproxy_present,
+            haproxy_up=st.haproxy_up,
+            haproxy_version=st.haproxy_version,
+            haproxy_listen=st.haproxy_listen,
             cpu_percent=st.cpu_percent,
             mem_percent=st.mem_percent,
             disk_percent=st.disk_percent,
@@ -222,10 +262,12 @@ async def nodes_agents(
 
     pairs = await asyncio.gather(*(one(n) for n in nodes))
     from app.services.agent_version import get_bundled_agent_version
+    from app.services.wgcf_releases import get_latest_wgcf_version
 
     return NodesAgentResponse(
         statuses=dict(pairs),
         latest_agent_version=get_bundled_agent_version(),
+        latest_wgcf_version=await get_latest_wgcf_version(),
     )
 
 
@@ -691,3 +733,594 @@ async def run_node_script(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/{node_id}/warp/install")
+async def install_node_warp(
+    node_id: uuid.UUID,
+    body: WarpInstallRequest,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """NDJSON stream: wgcf + wg-quick iface `warp` (no default route)."""
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+    host = node.host
+    ssh_port = node.ssh_port
+    username = node.ssh_user
+    auth_type = node.auth_type
+    force = body.force
+    node_id_str = str(node.id)
+    from app.services.wgcf_releases import WGCF_FALLBACK_VERSION, get_latest_wgcf_version
+
+    wgcf_version = (await get_latest_wgcf_version()) or WGCF_FALLBACK_VERSION
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        cancel = threading.Event()
+
+        def worker() -> None:
+            try:
+                for line in run_warp_script_via_ssh(
+                    host=host,
+                    ssh_port=ssh_port,
+                    username=username,
+                    auth_type=auth_type,
+                    password=password,
+                    private_key=private_key,
+                    force=force,
+                    wgcf_version=wgcf_version,
+                    cancel=cancel,
+                ):
+                    if cancel.is_set():
+                        raise AgentInstallCancelled()
+                    loop.call_soon_threadsafe(queue.put_nowait, {"type": "log", "line": line})
+                if cancel.is_set():
+                    raise AgentInstallCancelled()
+                clear_agent_status_cache(node_id_str)
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {
+                        "type": "done",
+                        "ok": True,
+                        "message": f"WARP установлен на {host}",
+                    },
+                )
+            except AgentInstallCancelled:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": AgentInstallCancelled.message},
+                )
+            except WarpScriptError as exc:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": exc.message},
+                )
+            except Exception as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": str(exc) or "Ошибка установки WARP"},
+                )
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        task = asyncio.create_task(asyncio.to_thread(worker))
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8")
+        except (asyncio.CancelledError, GeneratorExit):
+            cancel.set()
+            raise
+        finally:
+            cancel.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=8)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/haproxy-preview", response_model=HaproxyPreviewOut)
+async def preview_haproxy_config(
+    body: HaproxyPreviewRequest,
+    _: str = Depends(require_user),
+) -> HaproxyPreviewOut:
+    params = HaproxyParams(
+        template=body.template,
+        bind_port=body.bind_port,
+        backend=body.backend,
+        path_prefix=body.path_prefix,
+        proxy_protocol=body.proxy_protocol,
+        routes=[HaproxyRoute(listen=r.listen, backend=r.backend) for r in body.routes],
+    )
+    try:
+        config = render_haproxy_cfg(params)
+    except HaproxyScriptError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+    return HaproxyPreviewOut(
+        config=config,
+        template=body.template,
+        bind_port=body.bind_port,
+        backend=body.backend,
+        path_prefix=body.path_prefix,
+        proxy_protocol=body.proxy_protocol,
+        routes=body.routes,
+    )
+
+
+@router.get("/{node_id}/haproxy", response_model=HaproxyStatusOut)
+async def get_node_haproxy(
+    node_id: uuid.UUID,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> HaproxyStatusOut:
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+    status = await asyncio.to_thread(
+        fetch_haproxy_status,
+        host=node.host,
+        ssh_port=node.ssh_port,
+        username=node.ssh_user,
+        auth_type=node.auth_type,
+        password=password,
+        private_key=private_key,
+    )
+    parsed = None
+    if status.parsed is not None:
+        parsed = HaproxyParsedOut(
+            template=status.parsed.template,
+            bind_port=status.parsed.bind_port,
+            backend=status.parsed.backend,
+            path_prefix=status.parsed.path_prefix,
+            proxy_protocol=status.parsed.proxy_protocol,
+            routes=[
+                {"listen": r.listen, "backend": r.backend} for r in status.parsed.routes
+            ],
+        )
+    return HaproxyStatusOut(
+        installed=status.installed,
+        running=status.running,
+        enabled=status.enabled,
+        version=status.version,
+        config=status.config,
+        listen=status.listen,
+        valid=status.valid,
+        error=status.error,
+        parsed=parsed,
+    )
+
+
+@router.get("/{node_id}/haproxy-diag", response_model=HaproxyDiagOut)
+async def get_node_haproxy_diag(
+    node_id: uuid.UUID,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> HaproxyDiagOut:
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+    result = await asyncio.to_thread(
+        fetch_haproxy_diag,
+        host=node.host,
+        ssh_port=node.ssh_port,
+        username=node.ssh_user,
+        auth_type=node.auth_type,
+        password=password,
+        private_key=private_key,
+    )
+    return HaproxyDiagOut(lines=result.lines, error=result.error)
+
+
+def _haproxy_stats_out(node: Node, stats) -> HaproxyLiveStatsOut:
+    return HaproxyLiveStatsOut(
+        node_id=str(node.id),
+        node_name=node.name,
+        host=node.host,
+        uptime=stats.uptime,
+        curr_conns=stats.curr_conns,
+        cum_conns=stats.cum_conns,
+        conn_rate=stats.conn_rate,
+        bin=stats.bin,
+        bout=stats.bout,
+        rows=[
+            HaproxyStatRowOut(
+                pxname=r.pxname,
+                svname=r.svname,
+                scur=r.scur,
+                smax=r.smax,
+                stot=r.stot,
+                bin=r.bin,
+                bout=r.bout,
+                rate=r.rate,
+                rate_max=r.rate_max,
+                status=r.status,
+                ereq=r.ereq,
+                econ=r.econ,
+                eresp=r.eresp,
+                wretr=r.wretr,
+                wredis=r.wredis,
+                lastsess=r.lastsess,
+            )
+            for r in stats.rows
+        ],
+        sessions=[
+            HaproxySessionOut(
+                raw=s.raw,
+                src=s.src,
+                frontend=s.frontend,
+                backend=s.backend,
+                age=s.age,
+            )
+            for s in stats.sessions
+        ],
+        history=[
+            HaproxyHistoryPointOut(
+                ts=p.ts,
+                curr_conns=p.curr_conns,
+                conn_rate=p.conn_rate,
+                bin=p.bin,
+                bout=p.bout,
+            )
+            for p in stats.history
+        ],
+        errors=stats.errors,
+        error=stats.error,
+    )
+
+
+@router.get("/{node_id}/haproxy-stats", response_model=HaproxyLiveStatsOut)
+async def get_node_haproxy_stats(
+    node_id: uuid.UUID,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> HaproxyLiveStatsOut:
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+    stats = await asyncio.to_thread(
+        fetch_haproxy_stats,
+        host=node.host,
+        ssh_port=node.ssh_port,
+        username=node.ssh_user,
+        auth_type=node.auth_type,
+        password=password,
+        private_key=private_key,
+        node_id=str(node.id),
+    )
+    return _haproxy_stats_out(node, stats)
+
+
+@router.get("/{node_id}/capacity", response_model=VpsCapacityOut)
+async def get_node_capacity(
+    node_id: uuid.UUID,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> VpsCapacityOut:
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+    result = await asyncio.to_thread(
+        fetch_vps_capacity,
+        host=node.host,
+        ssh_port=node.ssh_port,
+        username=node.ssh_user,
+        auth_type=node.auth_type,
+        password=password,
+        private_key=private_key,
+    )
+    return VpsCapacityOut(
+        hostname=result.hostname,
+        os=result.os,
+        virt=result.virt,
+        cpu_cores=result.cpu_cores,
+        cpu_model=result.cpu_model,
+        ram_total_mb=result.ram_total_mb,
+        ram_avail_mb=result.ram_avail_mb,
+        disk_total_gb=result.disk_total_gb,
+        disk_free_gb=result.disk_free_gb,
+        loadavg=result.loadavg,
+        haproxy=result.haproxy,
+        haproxy_up=result.haproxy_up,
+        docker=result.docker,
+        remnanode=result.remnanode,
+        tcp_estab=result.tcp_estab,
+        conntrack_max=result.conntrack_max,
+        conntrack_count=result.conntrack_count,
+        comfort=result.comfort,
+        ceiling=result.ceiling,
+        panel_users=result.panel_users,
+        limiter=result.limiter,
+        summary=result.summary,
+        notes=result.notes,
+        error=result.error,
+    )
+
+
+@router.post("/{node_id}/haproxy")
+async def run_node_haproxy(
+    node_id: uuid.UUID,
+    body: HaproxyRunRequest,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """NDJSON stream: install / apply / reload / start / stop HAProxy."""
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+    host = node.host
+    ssh_port = node.ssh_port
+    username = node.ssh_user
+    auth_type = node.auth_type
+    node_id_str = str(node.id)
+    params = HaproxyParams(
+        action=body.action,
+        force=body.force,
+        template=body.template,
+        bind_port=body.bind_port,
+        backend=body.backend,
+        path_prefix=body.path_prefix,
+        proxy_protocol=body.proxy_protocol,
+        routes=[HaproxyRoute(listen=r.listen, backend=r.backend) for r in body.routes],
+        config=body.config,
+    )
+    from app.services.haproxy_script import validate_params
+
+    try:
+        validate_params(params)
+    except HaproxyScriptError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+
+    done_msg = {
+        "install": f"HAProxy установлен на {host}",
+        "apply": f"Конфиг HAProxy применён на {host}",
+        "reload": f"HAProxy reload на {host}",
+        "start": f"HAProxy запущен на {host}",
+        "stop": f"HAProxy остановлен на {host}",
+    }.get(body.action, f"HAProxy: {body.action} на {host}")
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        cancel = threading.Event()
+
+        def worker() -> None:
+            try:
+                for line in run_haproxy_script_via_ssh(
+                    host=host,
+                    ssh_port=ssh_port,
+                    username=username,
+                    auth_type=auth_type,
+                    password=password,
+                    private_key=private_key,
+                    params=params,
+                    cancel=cancel,
+                ):
+                    if cancel.is_set():
+                        raise AgentInstallCancelled()
+                    loop.call_soon_threadsafe(queue.put_nowait, {"type": "log", "line": line})
+                if cancel.is_set():
+                    raise AgentInstallCancelled()
+                clear_agent_status_cache(node_id_str)
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "done", "ok": True, "message": done_msg},
+                )
+            except AgentInstallCancelled:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": AgentInstallCancelled.message},
+                )
+            except HaproxyScriptError as exc:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": exc.message},
+                )
+            except Exception as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": str(exc) or "Ошибка HAProxy"},
+                )
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        task = asyncio.create_task(asyncio.to_thread(worker))
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8")
+        except (asyncio.CancelledError, GeneratorExit):
+            cancel.set()
+            raise
+        finally:
+            cancel.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=8)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _ndjson_line(item: dict) -> bytes:
+    return (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _ndjson_dest_job(worker) -> StreamingResponse:
+    async def event_stream() -> AsyncIterator[bytes]:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        cancel = threading.Event()
+
+        def run() -> None:
+            try:
+                payload: dict | None = None
+                for item in worker(cancel):
+                    if cancel.is_set():
+                        raise AgentInstallCancelled()
+                    if isinstance(item, dict):
+                        payload = item
+                    else:
+                        loop.call_soon_threadsafe(queue.put_nowait, {"type": "log", "line": item})
+                if cancel.is_set():
+                    raise AgentInstallCancelled()
+                if payload is None:
+                    raise DestPickError("нода не вернула результат")
+                done = {"type": "done", "ok": True, "message": "готово", **payload}
+                loop.call_soon_threadsafe(queue.put_nowait, done)
+            except AgentInstallCancelled:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": AgentInstallCancelled.message},
+                )
+            except (DestPickError, HaproxyScriptError, RemnaScriptError) as exc:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": exc.message},
+                )
+            except Exception as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": str(exc) or "Ошибка подбора прикрытия"},
+                )
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        # First bytes immediately — otherwise nginx/uvicorn sit silent until SSH.
+        yield _ndjson_line({"type": "log", "line": "панель: поток открыт, стартую SSH…"})
+
+        task = asyncio.create_task(asyncio.to_thread(run))
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield _ndjson_line(item)
+        except (asyncio.CancelledError, GeneratorExit):
+            cancel.set()
+            raise
+        finally:
+            cancel.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=8)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@router.post("/{node_id}/dest-scan")
+async def dest_scan_node(
+    node_id: uuid.UUID,
+    body: DestScanRequest,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """NDJSON: подбор REALITY dest с ноды. ru_only — только российские ресурсы."""
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+    extra = [s.strip() for s in body.extra if s and s.strip()]
+    host = node.host
+    ssh_port = node.ssh_port
+    username = node.ssh_user
+    auth_type = node.auth_type
+
+    def worker(cancel: threading.Event):
+        return run_dest_scan(
+            host=host,
+            ssh_port=ssh_port,
+            username=username,
+            auth_type=auth_type,
+            password=password,
+            private_key=private_key,
+            ru_only=body.ru_only,
+            scan_subnet=body.scan_subnet,
+            extra=extra,
+            limit=body.limit,
+            country_code=node.country_code,
+            node_name=node.name,
+            cancel=cancel,
+        )
+
+    return _ndjson_dest_job(worker)
+
+
+@router.post("/{node_id}/dest-loopback")
+async def dest_loopback_node(
+    node_id: uuid.UUID,
+    body: DestLoopbackRequest,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """NDJSON: петля REALITY на свободном порту ноды."""
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+    host = node.host
+    ssh_port = node.ssh_port
+    username = node.ssh_user
+    auth_type = node.auth_type
+
+    def worker(cancel: threading.Event):
+        return run_dest_loopback(
+            host=host,
+            ssh_port=ssh_port,
+            username=username,
+            auth_type=auth_type,
+            password=password,
+            private_key=private_key,
+            dests=body.dests,
+            port=body.port,
+            cancel=cancel,
+        )
+
+    return _ndjson_dest_job(worker)

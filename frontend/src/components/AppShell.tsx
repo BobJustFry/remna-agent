@@ -27,8 +27,12 @@ export type AppOutletContext = {
   statuses: OnlineMap;
   agentStatuses: AgentMap;
   latestAgentVersion: string | null;
+  latestWgcfVersion: string | null;
   refreshAgents: () => Promise<void>;
   openScriptRun: (nodes: NodeItem[], action: RemnaScriptAction) => void;
+  openWarpInstall: (nodes: NodeItem[], force?: boolean) => void;
+  /** In-flight RemnaNode/WARP jobs (queued or running, including confirm dialog). */
+  scriptBusy: Record<string, { warp: boolean; remna: boolean }>;
   remnawaveVersions: RemnawaveVersions | null;
   remnawaveLoading: boolean;
   refreshRemnawaveVersions: (force?: boolean) => Promise<RemnawaveVersions | void>;
@@ -43,11 +47,15 @@ export function AppShell({ username, onLogout }: Props) {
     action: RemnaScriptAction;
   } | null>(null);
   const [updateTargets, setUpdateTargets] = useState<NodeItem[] | null>(null);
+  const [warpTargets, setWarpTargets] = useState<{ nodes: NodeItem[]; force: boolean } | null>(
+    null,
+  );
   const [viewScriptJobKey, setViewScriptJobKey] = useState<string | null>(null);
   const { statuses } = useNodesOnline(true);
   const {
     statuses: agentStatuses,
     latestAgentVersion,
+    latestWgcfVersion,
     refresh: refreshAgents,
   } = useNodesAgents(true);
   const {
@@ -55,7 +63,11 @@ export function AppShell({ username, onLogout }: Props) {
     loading: remnawaveLoading,
     refresh: refreshRemnawaveVersions,
   } = useRemnawaveVersions(true);
-  const scriptQueue = useScriptQueue();
+  const scriptQueue = useScriptQueue({
+    onIdle: () => {
+      void refreshAgents();
+    },
+  });
 
   const reloadNodes = useCallback(async () => {
     const data = await api.listNodes();
@@ -80,6 +92,25 @@ export function AppShell({ username, onLogout }: Props) {
     setScriptTargets({ nodes: targetNodes, action });
   }, []);
 
+  const openWarpInstall = useCallback((targetNodes: NodeItem[], force = false) => {
+    if (targetNodes.length === 0) return;
+    setWarpTargets({ nodes: targetNodes, force });
+  }, []);
+
+  const scriptBusy: Record<string, { warp: boolean; remna: boolean }> = {};
+  const markBusy = (nodeId: string) => {
+    if (!scriptBusy[nodeId]) scriptBusy[nodeId] = { warp: false, remna: false };
+    return scriptBusy[nodeId];
+  };
+  for (const j of scriptQueue.jobList) {
+    if (j.phase !== "queued" && j.phase !== "running") continue;
+    if (j.action === "warp") markBusy(j.nodeId).warp = true;
+    else markBusy(j.nodeId).remna = true;
+  }
+  for (const n of warpTargets?.nodes ?? []) markBusy(n.id).warp = true;
+  for (const n of scriptTargets?.nodes ?? []) markBusy(n.id).remna = true;
+  for (const n of updateTargets ?? []) markBusy(n.id).remna = true;
+
   const ctx: AppOutletContext = {
     nodes,
     setNodes,
@@ -89,8 +120,11 @@ export function AppShell({ username, onLogout }: Props) {
     statuses,
     agentStatuses,
     latestAgentVersion,
+    latestWgcfVersion,
     refreshAgents,
     openScriptRun,
+    openWarpInstall,
+    scriptBusy,
     remnawaveVersions,
     remnawaveLoading,
     refreshRemnawaveVersions,
@@ -100,15 +134,19 @@ export function AppShell({ username, onLogout }: Props) {
 
   const trayJobs = scriptQueue.jobList.map((j) => ({
     nodeId: j.jobKey,
-    nodeName: `${j.nodeName} · ${j.action}`,
+    nodeName: `${j.nodeName} · ${j.action === "warp" ? "WARP" : j.action}`,
     host: j.host,
     sshLabel: j.sshLabel,
     phase: j.phase,
     lines: j.lines,
     statusMessage: j.statusMessage,
-    reinstall: j.action === "reinstall",
+    reinstall: j.action === "reinstall" || (j.action === "warp" && "force" in j.body && !!j.body.force),
     installDeps: false,
   }));
+  const trayHasWarp = scriptQueue.jobList.some((j) => j.action === "warp");
+  const trayHasRemna = scriptQueue.jobList.some((j) => j.action !== "warp");
+  const trayTitle =
+    trayHasWarp && !trayHasRemna ? "WARP" : trayHasWarp ? "Задачи на нодах" : "Скрипты RemnaNode";
 
   const latestNode = remnawaveVersions?.node_version;
 
@@ -140,7 +178,7 @@ export function AppShell({ username, onLogout }: Props) {
         {trayJobs.length > 0 && (
           <AgentInstallTray
             jobs={trayJobs}
-            title="Скрипты RemnaNode"
+            title={trayTitle}
             activeCount={scriptQueue.activeCount}
             doneCount={scriptQueue.doneCount}
             errorCount={scriptQueue.errorCount}
@@ -200,6 +238,41 @@ export function AppShell({ username, onLogout }: Props) {
           const targets = updateTargets;
           const keys = scriptQueue.enqueue(targets, { action: "update" });
           setUpdateTargets(null);
+          if (keys.length === 1) setViewScriptJobKey(keys[0]);
+        }}
+      />
+
+      <ConfirmDialog
+        open={!!warpTargets && warpTargets.nodes.length > 0}
+        title={
+          warpTargets && warpTargets.force
+            ? warpTargets.nodes.length > 1
+              ? `Переустановить WARP на ${warpTargets.nodes.length} нодах?`
+              : "Переустановить WARP?"
+            : warpTargets && warpTargets.nodes.length > 1
+              ? `Установить WARP на ${warpTargets.nodes.length} нодах?`
+              : "Установить WARP?"
+        }
+        message={
+          warpTargets && warpTargets.nodes.length === 1
+            ? `${warpTargets.nodes[0].name} · ${warpTargets.nodes[0].host}. Интерфейс warp (wgcf), без default route — для Xray sockopt.interface.`
+            : "На каждой ноде: wgcf register + wg-quick@warp. Маршрут по умолчанию не меняется."
+        }
+        confirmLabel={
+          warpTargets && warpTargets.nodes.length > 1
+            ? `${warpTargets.force ? "Переустановить" : "Установить"} (${warpTargets.nodes.length})`
+            : warpTargets?.force
+              ? "Переустановить"
+              : "Установить"
+        }
+        danger={false}
+        onCancel={() => setWarpTargets(null)}
+        onConfirm={() => {
+          if (!warpTargets?.nodes.length) return;
+          const targets = warpTargets.nodes;
+          const force = warpTargets.force;
+          const keys = scriptQueue.enqueue(targets, { action: "warp", force });
+          setWarpTargets(null);
           if (keys.length === 1) setViewScriptJobKey(keys[0]);
         }}
       />

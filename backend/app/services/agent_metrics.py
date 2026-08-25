@@ -25,6 +25,19 @@ class AgentStatus:
     version: str | None = None
     remnanode_version: str | None = None
     remnanode_running: bool | None = None
+    warp_present: bool | None = None
+    warp_up: bool | None = None
+    warp_healthy: bool | None = None
+    warp_handshake_sec: int | None = None
+    warp_egress_ok: bool | None = None
+    warp_interface: str | None = None
+    warp_method: str | None = None
+    warp_version: str | None = None
+    warp_ipv4: str | None = None
+    haproxy_present: bool | None = None
+    haproxy_up: bool | None = None
+    haproxy_version: str | None = None
+    haproxy_listen: str | None = None
     cpu_percent: float | None = None
     mem_percent: float | None = None
     disk_percent: float | None = None
@@ -119,12 +132,41 @@ async def _probe_once(
         remnanode_running = data.get("remnanode_running")
         if remnanode_running is not None and not isinstance(remnanode_running, bool):
             remnanode_running = None
+
+        def _as_bool(v: object) -> bool | None:
+            return v if isinstance(v, bool) else None
+
+        def _as_str(v: object) -> str | None:
+            return v if isinstance(v, str) and v else None
+
+        def _as_int(v: object) -> int | None:
+            if isinstance(v, bool) or v is None:
+                return None
+            if isinstance(v, int):
+                return v
+            if isinstance(v, float):
+                return int(v)
+            return None
+
         return AgentStatus(
             present=True,
             configured=True,
             version=data.get("version"),
             remnanode_version=data.get("remnanode_version"),
             remnanode_running=remnanode_running,
+            warp_present=_as_bool(data.get("warp_present")),
+            warp_up=_as_bool(data.get("warp_up")),
+            warp_healthy=_as_bool(data.get("warp_healthy")),
+            warp_handshake_sec=_as_int(data.get("warp_handshake_sec")),
+            warp_egress_ok=_as_bool(data.get("warp_egress_ok")),
+            warp_interface=_as_str(data.get("warp_interface")),
+            warp_method=_as_str(data.get("warp_method")),
+            warp_version=_as_str(data.get("warp_version")),
+            warp_ipv4=_as_str(data.get("warp_ipv4")),
+            haproxy_present=_as_bool(data.get("haproxy_present")),
+            haproxy_up=_as_bool(data.get("haproxy_up")),
+            haproxy_version=_as_str(data.get("haproxy_version")),
+            haproxy_listen=_as_str(data.get("haproxy_listen")),
             cpu_percent=data.get("cpu_percent"),
             mem_percent=data.get("mem_percent"),
             disk_percent=data.get("disk_percent"),

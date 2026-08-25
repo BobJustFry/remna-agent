@@ -4,6 +4,7 @@
 
 - `GET /health` — без авторизации
 - `GET /metrics` — `Authorization: Bearer <token>`
+  - CPU/RAM/disk, RemnaNode version, **WARP** (`warp_present` / `warp_up` / `warp_healthy` / handshake / iface)
 
 Переменные: `REMNA_AGENT_TOKEN`, `REMNA_AGENT_PORT` (по умолчанию `7422`).
 

@@ -20,3 +20,4 @@ backend/.pytest_cache/
 .docker-data/
 data/postgres/
 data/backups/
+data/wgcf/

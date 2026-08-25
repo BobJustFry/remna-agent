@@ -16,10 +16,13 @@ import { AgentInstallLogDialog } from "../components/AgentInstallLogDialog";
 import { AgentInstallTray } from "../components/AgentInstallTray";
 import type { AppOutletContext } from "../components/AppShell";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { CapacityDialog } from "../components/CapacityDialog";
+import { DestPickDialog } from "../components/DestPickDialog";
+import { HaproxyDialog } from "../components/HaproxyDialog";
 import { NodeForm } from "../components/NodeForm";
 import { NodeRow, type NodeListDensity } from "../components/NodeRow";
 import { useAgentInstallQueue } from "../hooks/useAgentInstallQueue";
-import { remnanodeNeedsUpdate } from "../hooks/useRemnawaveVersions";
+import { remnanodeNeedsUpdate, warpNeedsInstall } from "../hooks/useRemnawaveVersions";
 import type { NodeFormValues, NodeItem } from "../types";
 
 type ConfirmInstallState = { nodes: NodeItem[]; intent: InstallIntent };
@@ -51,8 +54,11 @@ export function NodesPage() {
     agentStatuses,
     refreshAgents,
     openScriptRun,
+    openWarpInstall,
+    scriptBusy,
     remnawaveVersions,
     latestAgentVersion,
+    latestWgcfVersion,
   } = useOutletContext<AppOutletContext>();
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -79,6 +85,11 @@ export function NodesPage() {
   const [rebootBusy, setRebootBusy] = useState(false);
   const [rebootingIds, setRebootingIds] = useState<Set<string>>(() => new Set());
   const [viewJobId, setViewJobId] = useState<string | null>(null);
+  const [haproxyNode, setHaproxyNode] = useState<NodeItem | null>(null);
+  const [haproxyBusyId, setHaproxyBusyId] = useState<string | null>(null);
+  const [destNode, setDestNode] = useState<NodeItem | null>(null);
+  const [destBusyId, setDestBusyId] = useState<string | null>(null);
+  const [capacityNode, setCapacityNode] = useState<NodeItem | null>(null);
 
   useEffect(() => {
     try {
@@ -97,8 +108,8 @@ export function NodesPage() {
 
   const compact = density === "compact";
   const headerGrid = compact
-    ? "lg:grid-cols-[28px_56px_minmax(100px,1fr)_minmax(100px,1fr)_48px_minmax(92px,auto)_minmax(110px,1fr)_minmax(64px,auto)_36px] lg:gap-2"
-    : "lg:grid-cols-[32px_120px_minmax(140px,1fr)_minmax(130px,1fr)_90px_minmax(110px,auto)_minmax(140px,1.1fr)_minmax(100px,auto)_44px] lg:gap-3";
+    ? "lg:grid-cols-[28px_56px_minmax(100px,1fr)_minmax(100px,1fr)_48px_minmax(92px,auto)_minmax(48px,auto)_minmax(48px,auto)_minmax(110px,1fr)_minmax(64px,auto)_36px] lg:gap-2"
+    : "lg:grid-cols-[32px_120px_minmax(140px,1fr)_minmax(130px,1fr)_90px_minmax(110px,auto)_minmax(56px,auto)_minmax(56px,auto)_minmax(140px,1.1fr)_minmax(100px,auto)_44px] lg:gap-3";
 
   const {
     jobs,
@@ -452,6 +463,27 @@ export function NodesPage() {
               openScriptRun(selectedNodes, action);
             }}
           />
+          {selectedNodes.some(
+            (n) =>
+              !scriptBusy[n.id]?.warp &&
+              warpNeedsInstall(agentStatuses[n.id], latestWgcfVersion),
+          ) && (
+            <button
+              type="button"
+              onClick={() => {
+                const targets = selectedNodes.filter(
+                  (n) =>
+                    !scriptBusy[n.id]?.warp &&
+                    warpNeedsInstall(agentStatuses[n.id], latestWgcfVersion),
+                );
+                const force = targets.some((n) => agentStatuses[n.id]?.warp_present === true);
+                openWarpInstall(targets, force);
+              }}
+              className="rounded-lg border border-[var(--accent)] bg-[var(--bg)] px-3 py-1.5 text-sm font-semibold text-[var(--accent)] transition hover:bg-[var(--accent-dim)]"
+            >
+              Установить WARP
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setSelectedIds(new Set())}
@@ -654,6 +686,20 @@ export function NodesPage() {
                 anyHeaderFilterOpen ? "pb-1.5" : ""
               }`}
             >
+              WARP
+            </div>
+            <div
+              className={`text-center text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--muted)] ${
+                anyHeaderFilterOpen ? "pb-1.5" : ""
+              }`}
+            >
+              HAP
+            </div>
+            <div
+              className={`text-center text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--muted)] ${
+                anyHeaderFilterOpen ? "pb-1.5" : ""
+              }`}
+            >
               Агент
             </div>
             <div
@@ -705,8 +751,17 @@ export function NodesPage() {
               }
               onReboot={(n) => setPendingReboot([n])}
               onRemnaScript={(n, action) => openScriptRun([n], action)}
+              onInstallWarp={(n, force) => openWarpInstall([n], force)}
+              onManageHaproxy={(n) => setHaproxyNode(n)}
+              onPickDest={(n) => setDestNode(n)}
+              onCapacityCheck={(n) => setCapacityNode(n)}
+              warpBusy={!!scriptBusy[node.id]?.warp}
+              haproxyBusy={haproxyBusyId === node.id}
+              destBusy={destBusyId === node.id}
+              remnaBusy={!!scriptBusy[node.id]?.remna}
               latestRemnanodeVersion={latestNodeVersion}
               latestAgentVersion={latestAgentVersion}
+              latestWgcfVersion={latestWgcfVersion}
               onOpenInstallLog={(id) => setViewJobId(id)}
               rebooting={rebootingIds.has(node.id)}
             />
@@ -723,6 +778,33 @@ export function NodesPage() {
           onDismissFinished={dismissFinished}
         />
       </div>
+
+      {capacityNode && (
+        <CapacityDialog node={capacityNode} onClose={() => setCapacityNode(null)} />
+      )}
+
+      {haproxyNode && (
+        <HaproxyDialog
+          node={haproxyNode}
+          onClose={() => {
+            setHaproxyNode(null);
+            setHaproxyBusyId(null);
+            void refreshAgents();
+          }}
+          onBusyChange={(busy) => setHaproxyBusyId(busy ? haproxyNode.id : null)}
+        />
+      )}
+
+      {destNode && (
+        <DestPickDialog
+          node={destNode}
+          onClose={() => {
+            setDestNode(null);
+            setDestBusyId(null);
+          }}
+          onBusyChange={(busy) => setDestBusyId(busy ? destNode.id : null)}
+        />
+      )}
 
       <NodeForm
         open={formOpen}

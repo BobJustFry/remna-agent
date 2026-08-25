@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import { api, type RemnaScriptAction } from "../api/client";
 import type { InstallJob } from "../hooks/useAgentInstallQueue";
-import { agentNeedsUpdate, remnanodeNeedsUpdate } from "../hooks/useRemnawaveVersions";
+import { agentNeedsUpdate, remnanodeNeedsUpdate, warpNeedsInstall } from "../hooks/useRemnawaveVersions";
 import type { AgentStatus, NodeItem, OnlineStatus, SshCheckResult } from "../types";
 import { CopyButton } from "./CopyButton";
 import { CountryFlag } from "./CountryFlag";
@@ -23,8 +23,17 @@ type Props = {
   onInstallAgent: (node: NodeItem) => void;
   onReboot: (node: NodeItem) => void;
   onRemnaScript?: (node: NodeItem, action: RemnaScriptAction) => void;
+  onInstallWarp?: (node: NodeItem, force?: boolean) => void;
+  onManageHaproxy?: (node: NodeItem) => void;
+  onPickDest?: (node: NodeItem) => void;
+  onCapacityCheck?: (node: NodeItem) => void;
+  warpBusy?: boolean;
+  haproxyBusy?: boolean;
+  destBusy?: boolean;
+  remnaBusy?: boolean;
   latestRemnanodeVersion?: string | null;
   latestAgentVersion?: string | null;
+  latestWgcfVersion?: string | null;
   onOpenInstallLog: (nodeId: string) => void;
   rebooting?: boolean;
 };
@@ -42,8 +51,17 @@ export const NodeRow = memo(function NodeRow({
   onInstallAgent,
   onReboot,
   onRemnaScript,
+  onInstallWarp,
+  onManageHaproxy,
+  onPickDest,
+  onCapacityCheck,
+  warpBusy,
+  haproxyBusy,
+  destBusy,
+  remnaBusy,
   latestRemnanodeVersion,
   latestAgentVersion,
+  latestWgcfVersion,
   onOpenInstallLog,
   rebooting,
 }: Props) {
@@ -109,7 +127,7 @@ export const NodeRow = memo(function NodeRow({
       {menuOpen && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
-          <div className="absolute right-0 z-20 mt-1 w-44 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] py-1 shadow-xl">
+          <div className="absolute right-0 z-20 mt-1 w-52 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] py-1 shadow-xl">
             <button
               type="button"
               className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--accent-dim)]"
@@ -192,13 +210,75 @@ export const NodeRow = memo(function NodeRow({
                     setMenuOpen(false);
                     onRemnaScript(node, "update");
                   }}
+                  disabled={remnaBusy}
                 >
-                  RemnaNode: обновить
-                  {needsRemnaUpdate && agent?.remnanode_version && latestRemnanodeVersion
-                    ? ` (${agent.remnanode_version}→${latestRemnanodeVersion})`
-                    : ""}
+                  {remnaBusy
+                    ? "RemnaNode: обновление…"
+                    : `RemnaNode: обновить${
+                        needsRemnaUpdate && agent?.remnanode_version && latestRemnanodeVersion
+                          ? ` (${agent.remnanode_version}→${latestRemnanodeVersion})`
+                          : ""
+                      }`}
                 </button>
               </>
+            )}
+            {onInstallWarp && (
+              <>
+                <div className="my-1 border-t border-[var(--border)]" />
+                <button
+                  type="button"
+                  className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--accent-dim)] disabled:opacity-50"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onInstallWarp(node, agent?.warp_present === true);
+                  }}
+                  disabled={warpBusy}
+                >
+                  {warpBusy
+                    ? "WARP: установка…"
+                    : agent?.warp_present
+                      ? "WARP: переустановить"
+                      : "WARP: установить"}
+                </button>
+              </>
+            )}
+            {onManageHaproxy && (
+              <button
+                type="button"
+                className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--accent-dim)] disabled:opacity-50"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onManageHaproxy(node);
+                }}
+                disabled={haproxyBusy}
+              >
+                {haproxyBusy ? "HAProxy…" : "HAProxy"}
+              </button>
+            )}
+            {onPickDest && (
+              <button
+                type="button"
+                className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--accent-dim)] disabled:opacity-50"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onPickDest(node);
+                }}
+                disabled={destBusy}
+              >
+                {destBusy ? "Прикрытие…" : "Прикрытие REALITY"}
+              </button>
+            )}
+            {onCapacityCheck && (
+              <button
+                type="button"
+                className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--accent-dim)]"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onCapacityCheck(node);
+                }}
+              >
+                Проверка
+              </button>
             )}
             <button
               type="button"
@@ -265,10 +345,49 @@ export const NodeRow = memo(function NodeRow({
       needsRemnaUpdate={needsRemnaUpdate}
       latestRemnanodeVersion={latestRemnanodeVersion}
       onUpdateRemna={onRemnaScript ? () => onRemnaScript(node, "update") : undefined}
+      remnaBusy={remnaBusy}
       needsAgentUpdate={needsAgentUpdate}
       latestAgentVersion={latestAgentVersion}
       onUpdateAgent={() => onInstallAgent(node)}
     />
+  );
+
+  const warpBlock = (
+    <WarpCell
+      agent={agent}
+      compact={compact}
+      latestWgcfVersion={latestWgcfVersion}
+      busy={warpBusy}
+      onInstall={onInstallWarp ? () => onInstallWarp(node, agent?.warp_present === true) : undefined}
+    />
+  );
+
+  const destBlock = onPickDest ? (
+    destBusy ? (
+      <CellSpinner title="Прикрытие…" large />
+    ) : (
+      <button
+        type="button"
+        onClick={() => onPickDest(node)}
+        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--accent)] transition hover:brightness-110"
+        title="Прикрытие REALITY"
+        aria-label="Прикрытие REALITY"
+      >
+        <DestIcon />
+      </button>
+    )
+  ) : null;
+
+  const haproxyBlock = (
+    <div className="flex items-center gap-1">
+      {destBlock}
+      <HaproxyCell
+        agent={agent}
+        compact={compact}
+        busy={haproxyBusy}
+        onManage={onManageHaproxy ? () => onManageHaproxy(node) : undefined}
+      />
+    </div>
   );
 
   const agentBlock = (
@@ -283,8 +402,8 @@ export const NodeRow = memo(function NodeRow({
   );
 
   const desktopGrid = compact
-    ? "lg:grid lg:grid-cols-[28px_56px_minmax(100px,1fr)_minmax(100px,1fr)_48px_minmax(92px,auto)_minmax(110px,1fr)_minmax(64px,auto)_36px] lg:gap-2"
-    : "lg:grid lg:grid-cols-[32px_120px_minmax(140px,1fr)_minmax(130px,1fr)_90px_minmax(110px,auto)_minmax(140px,1.1fr)_minmax(100px,auto)_44px] lg:gap-3";
+    ? "lg:grid lg:grid-cols-[28px_56px_minmax(100px,1fr)_minmax(100px,1fr)_48px_minmax(92px,auto)_minmax(48px,auto)_minmax(48px,auto)_minmax(110px,1fr)_minmax(64px,auto)_36px] lg:gap-2"
+    : "lg:grid lg:grid-cols-[32px_120px_minmax(140px,1fr)_minmax(130px,1fr)_90px_minmax(110px,auto)_minmax(56px,auto)_minmax(56px,auto)_minmax(140px,1.1fr)_minmax(100px,auto)_44px] lg:gap-3";
 
   return (
     <>
@@ -346,6 +465,8 @@ export const NodeRow = memo(function NodeRow({
 
         {authBlock}
         {versionsBlock}
+        {warpBlock}
+        {haproxyBlock}
         {agentBlock}
         {sshBlock}
         <div className="justify-self-end">{menu}</div>
@@ -407,8 +528,10 @@ export const NodeRow = memo(function NodeRow({
             {authBlock}
           </div>
 
-          <div className="mt-3 grid grid-cols-2 gap-3 border-t border-[var(--border)] pt-3">
+          <div className="mt-3 grid grid-cols-4 gap-3 border-t border-[var(--border)] pt-3">
             <div>{versionsBlock}</div>
+            <div>{warpBlock}</div>
+            <div>{haproxyBlock}</div>
             <div>{agentBlock}</div>
           </div>
 
@@ -419,12 +542,193 @@ export const NodeRow = memo(function NodeRow({
   );
 });
 
+function CellSpinner({ title, large }: { title: string; large?: boolean }) {
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center justify-center text-[var(--accent)] ${large ? "h-7 w-7" : "h-4 w-4"}`}
+      title={title}
+      aria-label={title}
+    >
+      <svg className={large ? "h-4 w-4 animate-spin" : "h-3.5 w-3.5 animate-spin"} viewBox="0 0 24 24" fill="none" aria-hidden>
+        <circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" />
+        <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+      </svg>
+    </span>
+  );
+}
+
+function HaproxyCell({
+  agent,
+  compact,
+  busy,
+  onManage,
+}: {
+  agent?: AgentStatus;
+  compact: boolean;
+  busy?: boolean;
+  onManage?: () => void;
+}) {
+  const iconBtn =
+    "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--accent)] transition hover:brightness-110";
+
+  if (busy) {
+    return <CellSpinner title="HAProxy…" large />;
+  }
+
+  if (!agent?.present) {
+    return onManage ? (
+      <button type="button" onClick={onManage} className={iconBtn} title="HAProxy" aria-label="HAProxy">
+        <HaproxyIcon />
+      </button>
+    ) : (
+      <span className="text-[11px] text-[var(--muted)]">—</span>
+    );
+  }
+
+  if (agent.haproxy_present == null) {
+    return onManage ? (
+      <button type="button" onClick={onManage} className={iconBtn} title="HAProxy (обновите агент)" aria-label="HAProxy">
+        <HaproxyIcon />
+      </button>
+    ) : (
+      <span className="text-[11px] text-[var(--muted)]" title="Обновите агент до 0.1.11+">
+        ?
+      </span>
+    );
+  }
+
+  if (!agent.haproxy_present) {
+    return onManage ? (
+      <button type="button" onClick={onManage} className={iconBtn} title="Установить HAProxy" aria-label="Установить HAProxy">
+        <HaproxyIcon />
+      </button>
+    ) : (
+      <span className="text-[11px] text-[var(--muted)]">—</span>
+    );
+  }
+
+  const down = agent.haproxy_up === false;
+  return (
+    <button
+      type="button"
+      onClick={onManage}
+      className={`inline-flex shrink-0 items-center justify-center rounded-md border font-semibold transition hover:brightness-110 ${
+        compact ? "h-6 px-1.5 text-[10px]" : "h-7 px-2 text-[11px]"
+      } ${
+        down
+          ? "border-[rgba(240,113,120,0.45)] bg-[rgba(240,113,120,0.1)] text-[var(--danger)]"
+          : "border-[rgba(34,211,187,0.45)] bg-[var(--accent-dim)] text-[var(--accent)]"
+      }`}
+      title={down ? "HAProxy не запущен" : "HAProxy"}
+      aria-label="HAProxy"
+    >
+      HAProxy
+    </button>
+  );
+}
+
+function WarpCell({
+  agent,
+  compact,
+  latestWgcfVersion,
+  busy,
+  onInstall,
+}: {
+  agent?: AgentStatus;
+  compact: boolean;
+  latestWgcfVersion?: string | null;
+  busy?: boolean;
+  onInstall?: () => void;
+}) {
+  const iconBtn =
+    "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--accent)] transition hover:brightness-110";
+
+  if (busy) {
+    return <CellSpinner title="Установка WARP…" large />;
+  }
+
+  if (!agent?.present) {
+    return <span className="text-[11px] text-[var(--muted)]">—</span>;
+  }
+
+  if (agent.warp_present == null) {
+    return (
+      <span className="text-[11px] text-[var(--muted)]" title="Обновите агент до 0.1.6+">
+        ?
+      </span>
+    );
+  }
+
+  const missing = !agent.warp_present;
+  const outdated = warpNeedsInstall(agent, latestWgcfVersion);
+
+  if (missing) {
+    return onInstall ? (
+      <button type="button" onClick={onInstall} className={iconBtn} title="Установить WARP" aria-label="Установить WARP">
+        <WarpInstallIcon />
+      </button>
+    ) : (
+      <span className="text-[11px] text-[var(--muted)]">—</span>
+    );
+  }
+
+  if (outdated) {
+    return onInstall ? (
+      <button
+        type="button"
+        onClick={onInstall}
+        className={iconBtn}
+        title={
+          agent.warp_version && latestWgcfVersion
+            ? `Обновить WARP ${agent.warp_version} → ${latestWgcfVersion}`
+            : "Обновить WARP"
+        }
+        aria-label="Обновить WARP"
+      >
+        <WarpUpdateIcon />
+      </button>
+    ) : (
+      <span className="text-[11px] text-[var(--muted)]">—</span>
+    );
+  }
+
+  const warpDead = agent.warp_healthy === false || agent.warp_up === false;
+  const warpAlive = !warpDead && (agent.warp_healthy === true || agent.warp_up === true);
+
+  return (
+    <span
+      className={`tabular-nums ${
+        warpDead ? "text-[var(--danger)]" : warpAlive ? "text-[var(--success)]" : "text-[var(--text)]"
+      } ${compact ? "text-[10px]" : "text-[11px]"}`}
+      title={
+        warpDead
+          ? [
+              "WARP мёртв",
+              agent.warp_up === false ? "интерфейс down" : null,
+              agent.warp_handshake_sec != null
+                ? `handshake ${agent.warp_handshake_sec}s назад`
+                : "нет handshake",
+              agent.warp_egress_ok === false ? "нет выхода через warp" : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")
+          : `WARP живой · ${agent.warp_interface ?? "warp"}${agent.warp_ipv4 ? ` · ${agent.warp_ipv4}` : ""}${
+              agent.warp_handshake_sec != null ? ` · handshake ${agent.warp_handshake_sec}s` : ""
+            }`
+      }
+    >
+      v{agent.warp_version}
+    </span>
+  );
+}
+
 function VersionsCell({
   agent,
   compact,
   needsRemnaUpdate,
   latestRemnanodeVersion,
   onUpdateRemna,
+  remnaBusy,
   needsAgentUpdate,
   latestAgentVersion,
   onUpdateAgent,
@@ -434,6 +738,7 @@ function VersionsCell({
   needsRemnaUpdate?: boolean;
   latestRemnanodeVersion?: string | null;
   onUpdateRemna?: () => void;
+  remnaBusy?: boolean;
   needsAgentUpdate?: boolean;
   latestAgentVersion?: string | null;
   onUpdateAgent?: () => void;
@@ -477,10 +782,15 @@ function VersionsCell({
         >
           {rnLabel}
         </span>
-        {needsRemnaUpdate && onUpdateRemna && (
-          <button type="button" onClick={onUpdateRemna} className={btnCls} title="Обновить RemnaNode">
-            ↑
-          </button>
+        {remnaBusy ? (
+          <CellSpinner title="Обновление RemnaNode…" />
+        ) : (
+          needsRemnaUpdate &&
+          onUpdateRemna && (
+            <button type="button" onClick={onUpdateRemna} className={btnCls} title="Обновить RemnaNode">
+              ↑
+            </button>
+          )
         )}
       </div>
       <div className="mt-0.5 flex items-center gap-1">
@@ -530,8 +840,12 @@ function AgentCell({
         <button
           type="button"
           onClick={onOpenLog}
-          className={`font-semibold text-[var(--accent)] hover:underline ${text}`}
+          className={`inline-flex items-center gap-1 font-semibold text-[var(--accent)] hover:underline ${text}`}
         >
+          <svg className="h-3.5 w-3.5 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden>
+            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" />
+            <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+          </svg>
           {installJob.phase === "queued" ? "Очередь…" : "Установка…"}
         </button>
       </div>
@@ -670,6 +984,42 @@ function CopyIcon() {
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="inline">
       <rect x="9" y="9" width="13" height="13" rx="2" />
       <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+    </svg>
+  );
+}
+
+function DestIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <circle cx="12" cy="12" r="8" />
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+    </svg>
+  );
+}
+
+function HaproxyIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <path d="M4 7h16M4 12h10M4 17h16" />
+      <circle cx="18" cy="12" r="2" />
+    </svg>
+  );
+}
+
+function WarpInstallIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+function WarpUpdateIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <path d="M12 19V6" />
+      <path d="M6 11l6-6 6 6" />
     </svg>
   );
 }

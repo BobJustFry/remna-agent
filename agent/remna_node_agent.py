@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -14,12 +15,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "0.1.4"
+VERSION = "0.1.11"
 STARTED_AT = time.time()
 _LAST_CPU = None
 _REMNA_VER_CACHE: tuple[float, bool, str | None] | None = None
 _REMNA_VER_TTL = 60.0
+_WARP_CACHE: tuple[float, dict] | None = None
+_WARP_TTL = 60.0
+_HAPROXY_CACHE: tuple[float, dict] | None = None
+_HAPROXY_TTL = 20.0
+_WARP_HANDSHAKE_MAX = 180
+_WARP_EGRESS_TTL = 180.0
 _SEMVER_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][\w.]+)?)$", re.I)
+_WARP_IFACES = ("warp", "CloudflareWARP", "WARP")
+_WARP_TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
+_egress_lock = threading.Lock()
+_egress_state: dict = {"ok": None, "at": 0.0, "busy": False, "iface": None}
 
 
 def env(name: str, default: str | None = None) -> str | None:
@@ -345,10 +356,287 @@ def remnanode_info() -> tuple[bool, str | None]:
     return running, version
 
 
+def _run_cmd(args: list[str], timeout: float = 2.0) -> str | None:
+    try:
+        out = subprocess.check_output(
+            args,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            text=True,
+        )
+        return out.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _which(name: str) -> str | None:
+    extra = ("/usr/local/bin", "/usr/bin", "/bin", "/opt/warp-wgcf")
+    dirs = list(os.environ.get("PATH", "").split(":")) + list(extra)
+    seen: set[str] = set()
+    for d in dirs:
+        if not d or d in seen:
+            continue
+        seen.add(d)
+        p = Path(d) / name
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return None
+
+
+def _iface_up(name: str) -> bool:
+    oper = Path(f"/sys/class/net/{name}/operstate")
+    try:
+        state = oper.read_text(encoding="utf-8").strip().lower()
+        if state == "up":
+            return True
+        if state == "unknown":
+            # WireGuard often reports unknown; treat carrier/flags as up.
+            flags = Path(f"/sys/class/net/{name}/flags")
+            raw = int(flags.read_text(encoding="utf-8").strip(), 0)
+            return bool(raw & 0x1)  # IFF_UP
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def _iface_ipv4(name: str) -> str | None:
+    out = _run_cmd(["ip", "-4", "-o", "addr", "show", "dev", name])
+    if not out:
+        return None
+    m = re.search(r"\binet\s+(\d+\.\d+\.\d+\.\d+)", out)
+    return m.group(1) if m else None
+
+
+def _handshake_age_sec(iface: str) -> int | None:
+    """Seconds since last WireGuard handshake, or None if never."""
+    out = _run_cmd(["wg", "show", iface, "latest-handshakes"])
+    if not out:
+        return None
+    now = int(time.time())
+    best: int | None = None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            ts = int(parts[-1])
+        except ValueError:
+            continue
+        if ts <= 0:
+            continue
+        age = max(0, now - ts)
+        if best is None or age < best:
+            best = age
+    return best
+
+
+def _egress_worker(iface: str) -> None:
+    curl = _which("curl")
+    ok = False
+    if curl:
+        out = _run_cmd(
+            [
+                curl,
+                "-4",
+                "--interface",
+                iface,
+                "-sS",
+                "--max-time",
+                "8",
+                _WARP_TRACE_URL,
+            ],
+            timeout=12.0,
+        )
+        if out and ("warp=on" in out or ("colo=" in out and "ip=" in out)):
+            ok = True
+    with _egress_lock:
+        _egress_state["ok"] = ok
+        _egress_state["at"] = time.time()
+        _egress_state["busy"] = False
+        _egress_state["iface"] = iface
+
+
+def _kick_egress(iface: str) -> bool | None:
+    """Return last egress result; refresh at most every _WARP_EGRESS_TTL seconds."""
+    with _egress_lock:
+        now = time.time()
+        if _egress_state["iface"] != iface:
+            _egress_state["ok"] = None
+            _egress_state["at"] = 0.0
+        age = now - float(_egress_state["at"] or 0)
+        result = _egress_state["ok"]
+        stale = result is None or age >= _WARP_EGRESS_TTL
+        if not stale or _egress_state["busy"]:
+            return result if isinstance(result, bool) else None
+        _egress_state["busy"] = True
+    threading.Thread(target=_egress_worker, args=(iface,), daemon=True, name="warp-egress").start()
+    return result if isinstance(result, bool) else None
+
+
+def _version_from_go_binary(bin_path: str) -> str | None:
+    """wgcf has no --version; read Go build info embedded in the binary."""
+    try:
+        data = Path(bin_path).read_bytes()
+    except OSError:
+        return None
+    m = re.search(rb"github\.com/ViRb3/wgcf/v2\tv(\d+\.\d+\.\d+)", data)
+    if m:
+        return m.group(1).decode("ascii")
+    m = re.search(rb"ViRb3/wgcf[^\x00]{0,32}v(\d+\.\d+\.\d+)", data)
+    if m:
+        return m.group(1).decode("ascii")
+    return None
+
+
+def _tool_version(bin_path: str) -> str | None:
+    for args in ([bin_path, "version"], [bin_path, "--version"], [bin_path, "-V"]):
+        out = _run_cmd(args)
+        if not out:
+            continue
+        for line in out.splitlines():
+            if "unknown" in line.lower() or "error:" in line.lower() or line.lower().startswith("usage:"):
+                continue
+            m = re.search(r"\b(\d+\.\d+\.\d+(?:[-+][\w.]+)?)\b", line)
+            if m:
+                return m.group(1)
+    return _version_from_go_binary(bin_path)
+
+
+def _read_stamp_version(path: Path) -> str | None:
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    m = re.search(r"(\d+\.\d+\.\d+)", raw)
+    return m.group(1) if m else None
+
+
+def _warp_health(iface: str | None, *, present: bool, up: bool) -> tuple[bool, int | None, bool | None]:
+    handshake_sec = _handshake_age_sec(iface) if iface and up else None
+    egress_ok = _kick_egress(iface) if iface and up else None
+    handshake_ok = handshake_sec is not None and handshake_sec <= _WARP_HANDSHAKE_MAX
+    if not present or not up:
+        healthy = False
+    elif egress_ok is False and not handshake_ok:
+        healthy = False
+    else:
+        healthy = handshake_ok or egress_ok is True
+    return healthy, handshake_sec, egress_ok
+
+
+def warp_info() -> dict:
+    """Detect host WARP interface used by Xray sockopt.interface (freedom → warp)."""
+    global _WARP_CACHE
+    now = time.time()
+    if _WARP_CACHE is not None and (now - _WARP_CACHE[0]) < _WARP_TTL:
+        return _WARP_CACHE[1]
+
+    iface: str | None = None
+    for name in _WARP_IFACES:
+        if Path(f"/sys/class/net/{name}").is_dir():
+            iface = name
+            break
+
+    present = iface is not None
+    up = _iface_up(iface) if iface else False
+    ipv4 = _iface_ipv4(iface) if iface and up else None
+    healthy, handshake_sec, egress_ok = _warp_health(iface, present=present, up=up)
+
+    wgcf_bin = next(
+        (
+            str(p)
+            for p in (
+                Path("/usr/local/bin/wgcf"),
+                Path("/usr/bin/wgcf"),
+                Path("/opt/warp-wgcf/wgcf"),
+            )
+            if p.is_file()
+        ),
+        _which("wgcf"),
+    )
+    warp_cli = _which("warp-cli")
+    warp_go = _which("warp-go")
+    stamp = _read_stamp_version(Path("/opt/warp-wgcf/version"))
+
+    method: str | None = None
+    version: str | None = stamp
+
+    # Prefer wgcf when iface is the wg-quick name our installer uses.
+    if iface in ("warp", "WARP") or Path("/etc/wireguard/warp.conf").is_file() or wgcf_bin:
+        method = "wgcf"
+        if not version and wgcf_bin:
+            version = _tool_version(wgcf_bin)
+    elif iface == "CloudflareWARP" or warp_cli or Path("/lib/systemd/system/warp-svc.service").is_file():
+        method = "warp-cli"
+        if not version and warp_cli:
+            version = _tool_version(warp_cli)
+    elif warp_go:
+        method = "warp-go"
+        if not version:
+            version = _tool_version(warp_go)
+    elif present:
+        method = "wireguard"
+
+    data = {
+        "warp_present": present,
+        "warp_up": up if present else False,
+        "warp_healthy": healthy if present else False,
+        "warp_handshake_sec": handshake_sec,
+        "warp_egress_ok": egress_ok,
+        "warp_interface": iface,
+        "warp_method": method,
+        "warp_version": version,
+        "warp_ipv4": ipv4,
+    }
+    _WARP_CACHE = (now, data)
+    return data
+
+
+def haproxy_info() -> dict:
+    """Host HAProxy: package/binary, systemd active, listen addresses."""
+    global _HAPROXY_CACHE
+    now = time.time()
+    if _HAPROXY_CACHE is not None and (now - _HAPROXY_CACHE[0]) < _HAPROXY_TTL:
+        return _HAPROXY_CACHE[1]
+
+    bin_path = _which("haproxy")
+    if not bin_path and Path("/usr/sbin/haproxy").is_file():
+        bin_path = "/usr/sbin/haproxy"
+    present = bool(bin_path) or Path("/etc/haproxy/haproxy.cfg").is_file()
+    up = (_run_cmd(["systemctl", "is-active", "haproxy"]) or "") == "active"
+
+    version = None
+    if bin_path:
+        raw = _run_cmd([bin_path, "-v"]) or ""
+        m = re.search(r"version\s+(\S+)", raw, re.I)
+        version = m.group(1) if m else None
+
+    listen: list[str] = []
+    ss_out = _run_cmd(["ss", "-lntp"]) or ""
+    for line in ss_out.splitlines():
+        if "haproxy" not in line:
+            continue
+        for m in re.finditer(r"(\S+:\d+)\s", line):
+            addr = m.group(1)
+            if addr not in listen:
+                listen.append(addr)
+
+    data = {
+        "haproxy_present": present,
+        "haproxy_up": up if present else False,
+        "haproxy_version": version,
+        "haproxy_listen": ",".join(listen) if listen else None,
+    }
+    _HAPROXY_CACHE = (now, data)
+    return data
+
+
 def collect_metrics() -> dict:
     mem_total, mem_used, mem_percent = mem_stats()
     disk_total, disk_used, disk_percent = disk_stats("/")
     rn_running, rn_version = remnanode_info()
+    warp = warp_info()
+    haproxy = haproxy_info()
     return {
         "version": VERSION,
         "uptime_sec": int(time.time() - STARTED_AT),
@@ -362,6 +650,8 @@ def collect_metrics() -> dict:
         "loadavg": loadavg(),
         "remnanode_running": rn_running,
         "remnanode_version": rn_version,
+        **warp,
+        **haproxy,
     }
 
 

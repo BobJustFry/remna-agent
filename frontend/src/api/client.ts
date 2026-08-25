@@ -77,7 +77,11 @@ export const api = {
     request<{ auth_type: AuthType; secret: string }>(`/api/nodes/${id}/secret`),
   online: () => request<{ statuses: OnlineMap }>("/api/nodes/online"),
   agents: () =>
-    request<{ statuses: AgentMap; latest_agent_version: string }>("/api/nodes/agents"),
+    request<{
+      statuses: AgentMap;
+      latest_agent_version: string;
+      latest_wgcf_version: string | null;
+    }>("/api/nodes/agents"),
   sshCheck: (id: string) =>
     request<SshCheckResult>(`/api/nodes/${id}/ssh-check`, { method: "POST" }),
   rebootNode: (id: string) =>
@@ -124,6 +128,101 @@ export const api = {
       signal: opts.signal,
       onEvent: opts.onEvent,
     }),
+    installWarpStream: (
+    id: string,
+    opts: {
+      onEvent: (event: ScriptStreamEvent) => void;
+      signal?: AbortSignal;
+      force?: boolean;
+    },
+  ) =>
+    streamNdjson(`/api/nodes/${id}/warp/install`, {
+      method: "POST",
+      body: JSON.stringify({ force: !!opts.force }),
+      signal: opts.signal,
+      onEvent: opts.onEvent,
+    }),
+  getHaproxy: (id: string) => request<HaproxyStatus>(`/api/nodes/${id}/haproxy`),
+  getHaproxyDiag: (id: string) => request<HaproxyDiag>(`/api/nodes/${id}/haproxy-diag`),
+  getHaproxyStats: (id: string) => request<HaproxyLiveStats>(`/api/nodes/${id}/haproxy-stats`),
+  getCapacity: (id: string) => request<VpsCapacity>(`/api/nodes/${id}/capacity`),
+  haproxyPreview: (body: HaproxyPreviewBody) =>
+    request<{ config: string } & HaproxyPreviewBody>("/api/nodes/haproxy-preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  runHaproxyStream: (
+    id: string,
+    opts: {
+      action: HaproxyAction;
+      force?: boolean;
+      template?: HaproxyTemplate;
+      bind_port?: number;
+      backend?: string;
+      path_prefix?: string;
+      proxy_protocol?: boolean;
+      routes?: HaproxyRoute[];
+      config?: string;
+      onEvent: (event: ScriptStreamEvent) => void;
+      signal?: AbortSignal;
+    },
+  ) =>
+    streamNdjson(`/api/nodes/${id}/haproxy`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: opts.action,
+        force: !!opts.force,
+        template: opts.template ?? "minimal",
+        bind_port: opts.bind_port ?? 80,
+        backend: opts.backend ?? "127.0.0.1:10087",
+        path_prefix: opts.path_prefix ?? "/api/generate/",
+        proxy_protocol: opts.proxy_protocol ?? true,
+        routes: opts.routes ?? [],
+        config: opts.config || null,
+      }),
+      signal: opts.signal,
+      onEvent: opts.onEvent,
+    }),
+  destScanStream: (
+    id: string,
+    opts: {
+      ru_only?: boolean;
+      scan_subnet?: boolean | null;
+      extra?: string[];
+      limit?: number;
+      onEvent: (event: DestScanEvent) => void;
+      signal?: AbortSignal;
+    },
+  ) =>
+    streamNdjson<DestScanEvent>(`/api/nodes/${id}/dest-scan`, {
+      method: "POST",
+      body: JSON.stringify({
+        ru_only: opts.ru_only ?? true,
+        scan_subnet: opts.scan_subnet ?? null,
+        extra: opts.extra ?? [],
+        limit: opts.limit ?? 45,
+      }),
+      signal: opts.signal,
+      onEvent: opts.onEvent,
+    }),
+  destLoopbackStream: (
+    id: string,
+    opts: {
+      dests: string[];
+      port?: number;
+      onEvent: (event: DestLoopbackEvent) => void;
+      signal?: AbortSignal;
+    },
+  ) =>
+    streamNdjson<DestLoopbackEvent>(`/api/nodes/${id}/dest-loopback`, {
+      method: "POST",
+      body: JSON.stringify({
+        dests: opts.dests,
+        port: opts.port ?? 18443,
+      }),
+      signal: opts.signal,
+      onEvent: opts.onEvent,
+    }),
 };
 
 export type RemnawaveVersions = {
@@ -136,6 +235,128 @@ export type RemnawaveVersions = {
 };
 
 export type RemnaScriptAction = "install" | "reinstall" | "tune" | "update";
+export type ScriptQueueAction = RemnaScriptAction | "warp";
+export type HaproxyAction = "install" | "apply" | "reload" | "start" | "stop";
+export type HaproxyTemplate = "minimal" | "front-xhttp" | "tcp";
+
+export type HaproxyRoute = {
+  listen: number;
+  backend: string;
+};
+
+export type HaproxyPreviewBody = {
+  template: HaproxyTemplate;
+  bind_port: number;
+  backend: string;
+  path_prefix: string;
+  proxy_protocol: boolean;
+  routes?: HaproxyRoute[];
+};
+
+export type VpsCapacity = {
+  hostname: string | null;
+  os: string | null;
+  virt: string | null;
+  cpu_cores: number;
+  cpu_model: string | null;
+  ram_total_mb: number;
+  ram_avail_mb: number;
+  disk_total_gb: number;
+  disk_free_gb: number;
+  loadavg: number[];
+  haproxy: boolean;
+  haproxy_up: boolean;
+  docker: boolean;
+  remnanode: boolean;
+  tcp_estab: number;
+  conntrack_max: number | null;
+  conntrack_count: number | null;
+  comfort: number;
+  ceiling: number;
+  panel_users: number;
+  limiter: string;
+  summary: string;
+  notes: string[];
+  error: string | null;
+};
+
+export type HaproxyParsed = {
+  template: HaproxyTemplate | null;
+  bind_port: number | null;
+  backend: string | null;
+  path_prefix: string | null;
+  proxy_protocol: boolean;
+  routes?: HaproxyRoute[];
+};
+
+export type HaproxyStatus = {
+  installed: boolean;
+  running: boolean;
+  enabled: boolean;
+  version: string | null;
+  config: string | null;
+  listen: string[];
+  valid: boolean | null;
+  error: string | null;
+  parsed?: HaproxyParsed | null;
+};
+
+export type HaproxyDiag = {
+  lines: string[];
+  error: string | null;
+};
+
+export type HaproxyStatRow = {
+  pxname: string;
+  svname: string;
+  scur: number | null;
+  smax: number | null;
+  stot: number | null;
+  bin: number | null;
+  bout: number | null;
+  rate: number | null;
+  rate_max: number | null;
+  status: string;
+  ereq: number | null;
+  econ: number | null;
+  eresp: number | null;
+  wretr: number | null;
+  wredis: number | null;
+  lastsess: number | null;
+};
+
+export type HaproxySession = {
+  raw: string;
+  src: string | null;
+  frontend: string | null;
+  backend: string | null;
+  age: string | null;
+};
+
+export type HaproxyHistoryPoint = {
+  ts: number;
+  curr_conns: number | null;
+  conn_rate: number | null;
+  bin: number | null;
+  bout: number | null;
+};
+
+export type HaproxyLiveStats = {
+  node_id: string | null;
+  node_name: string | null;
+  host: string | null;
+  uptime: string | null;
+  curr_conns: number | null;
+  cum_conns: number | null;
+  conn_rate: number | null;
+  bin: number | null;
+  bout: number | null;
+  rows: HaproxyStatRow[];
+  sessions: HaproxySession[];
+  history: HaproxyHistoryPoint[];
+  errors: string;
+  error: string | null;
+};
 
 export type RemnaScriptDefaults = {
   node_port: number;
@@ -177,9 +398,68 @@ export type RemnaScriptRunBody = {
   skip_system_update?: boolean;
 };
 
+export type ScriptQueueBody = RemnaScriptRunBody | { action: "warp"; force?: boolean };
+
 export type ScriptStreamEvent =
   | { type: "log"; line: string }
   | { type: "done"; ok: true; message: string }
+  | { type: "error"; message: string };
+
+export type DestCandidate = {
+  host: string;
+  ok: boolean;
+  why: string;
+  verdict?: string;
+  near?: boolean;
+  noisy?: boolean;
+  tls13?: boolean;
+  code?: string;
+  http_version?: string;
+  connect_ms?: number;
+  tls_ms?: number;
+  connect_med?: number | null;
+  ip?: string;
+  redirect?: string;
+  cdn?: string;
+  kex?: string;
+  stalls?: number;
+  fails?: number;
+};
+
+export type DestLoopResult = {
+  host: string;
+  ok: boolean;
+  note: string;
+};
+
+export type DestScanEvent =
+  | { type: "log"; line: string }
+  | {
+      type: "done";
+      ok: true;
+      message: string;
+      own?: string;
+      subnet?: string;
+      alive443?: number;
+      found?: number;
+      checked: DestCandidate[];
+      good: DestCandidate[];
+      best: string | null;
+      ru_only: boolean;
+      country?: string | null;
+    }
+  | { type: "error"; message: string };
+
+export type DestLoopbackEvent =
+  | { type: "log"; line: string }
+  | {
+      type: "done";
+      ok: true;
+      message: string;
+      results: DestLoopResult[];
+      winners: DestLoopResult[];
+      best: string | null;
+    }
   | { type: "error"; message: string };
 
 export type AgentInstallStreamEvent =

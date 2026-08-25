@@ -1,14 +1,16 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useOutletContext } from "react-router-dom";
+import { api, type HaproxyLiveStats } from "../api/client";
 import type { AppOutletContext } from "../components/AppShell";
 import { CountryFlag } from "../components/CountryFlag";
 import { HostingLogo } from "../components/HostingLogo";
+import { formatBytes, HaproxyStatsView } from "../components/HaproxyStatsView";
 import { OnlineBadge } from "../components/OnlineBadge";
 import { agentNeedsUpdate, remnanodeNeedsUpdate } from "../hooks/useRemnawaveVersions";
 import { countryName } from "../lib/countries";
 import type { AgentStatus, NodeItem, OnlineStatus } from "../types";
 
-type DashTab = "overview" | "issues" | "load" | "geo" | "versions";
+type DashTab = "overview" | "issues" | "load" | "geo" | "versions" | "haproxy";
 
 type IssueKind = "offline" | "no_agent" | "agent_down" | "token" | "port";
 
@@ -40,6 +42,7 @@ const TABS: { id: DashTab; label: string }[] = [
   { id: "load", label: "Нагрузка" },
   { id: "geo", label: "Распределение" },
   { id: "versions", label: "Версии" },
+  { id: "haproxy", label: "HAProxy" },
 ];
 
 const TAB_KEY = "remna.dashboard.tab";
@@ -68,6 +71,64 @@ export function DashboardPage() {
   } = useOutletContext<AppOutletContext>();
 
   const [tab, setTab] = useState<DashTab>(() => readTab());
+  const [hpStats, setHpStats] = useState<Record<string, HaproxyLiveStats>>({});
+  const [hpLoading, setHpLoading] = useState(false);
+
+  const haproxyNodes = useMemo(
+    () =>
+      nodes.filter((n) => {
+        const agent = agentStatuses[n.id];
+        return agent?.haproxy_present === true || /haproxy/i.test(n.name);
+      }),
+    [nodes, agentStatuses],
+  );
+
+  const haproxyKey = haproxyNodes.map((n) => n.id).join(",");
+
+  const loadHaproxyFleet = useCallback(async () => {
+    const targets = nodes.filter((n) => haproxyKey.split(",").includes(n.id));
+    if (targets.length === 0) {
+      setHpStats({});
+      return;
+    }
+    setHpLoading(true);
+    const entries = await Promise.all(
+      targets.map(async (n) => {
+        try {
+          return [n.id, await api.getHaproxyStats(n.id)] as const;
+        } catch (err) {
+          const empty: HaproxyLiveStats = {
+            node_id: n.id,
+            node_name: n.name,
+            host: n.host,
+            uptime: null,
+            curr_conns: null,
+            cum_conns: null,
+            conn_rate: null,
+            bin: null,
+            bout: null,
+            rows: [],
+            sessions: [],
+            history: [],
+            errors: "",
+            error: err instanceof Error ? err.message : "ошибка",
+          };
+          return [n.id, empty] as const;
+        }
+      }),
+    );
+    setHpStats(Object.fromEntries(entries));
+    setHpLoading(false);
+  }, [haproxyKey, nodes]);
+
+  useEffect(() => {
+    if (tab !== "haproxy") return;
+    void loadHaproxyFleet();
+    const timer = window.setInterval(() => {
+      void loadHaproxyFleet();
+    }, 20000);
+    return () => window.clearInterval(timer);
+  }, [tab, haproxyKey, loadHaproxyFleet]);
 
   function selectTab(next: DashTab) {
     setTab(next);
@@ -109,6 +170,7 @@ export function DashboardPage() {
               void reloadNodes();
               void refreshAgents();
               void refreshRemnawaveVersions(true);
+              if (tab === "haproxy") void loadHaproxyFleet();
             }}
             className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-[var(--muted)] hover:text-[var(--text)]"
           >
@@ -132,7 +194,9 @@ export function DashboardPage() {
                 ? stats.issues.length
                 : t.id === "versions"
                   ? stats.versionOutdated
-                  : 0;
+                  : t.id === "haproxy"
+                    ? haproxyNodes.length
+                    : 0;
             return (
               <button
                 key={t.id}
@@ -409,7 +473,75 @@ export function DashboardPage() {
             )}
           </Panel>
         )}
+
+        {tab === "haproxy" && (
+          <HaproxyDash
+            nodes={haproxyNodes}
+            stats={hpStats}
+            loading={hpLoading}
+            onRefresh={() => void loadHaproxyFleet()}
+          />
+        )}
       </div>
+    </div>
+  );
+}
+
+function HaproxyDash({
+  nodes,
+  stats,
+  loading,
+  onRefresh,
+}: {
+  nodes: NodeItem[];
+  stats: Record<string, HaproxyLiveStats>;
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  const list = nodes.map((n) => stats[n.id]).filter(Boolean);
+  const curr = list.reduce((s, x) => s + (x.curr_conns ?? 0), 0);
+  const bin = list.reduce((s, x) => s + (x.bin ?? 0), 0);
+  const bout = list.reduce((s, x) => s + (x.bout ?? 0), 0);
+  const bad = list.filter((x) => x.error || x.rows.some((r) => /down|nolb/i.test(r.status))).length;
+
+  return (
+    <div className="space-y-4">
+      <section className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <Stat label="Коробки" value={nodes.length} />
+        <Stat label="Сейчас сессий" value={curr} />
+        <Stat label="Проблемы" value={bad} tone={bad ? "danger" : "muted"} />
+        <div className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-row)] px-3 py-3">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--muted)]">
+            Трафик
+          </div>
+          <div className="mt-1 text-sm font-semibold tabular-nums text-[var(--text)]">
+            ↓ {formatBytes(bin)} · ↑ {formatBytes(bout)}
+          </div>
+        </div>
+      </section>
+
+      {nodes.length === 0 ? (
+        <Empty text="HAProxy ни на одной ноде не найден. Поставьте его из списка нод." />
+      ) : (
+        nodes.map((n) => (
+          <Panel
+            key={n.id}
+            title={n.name}
+            subtitle={n.host}
+            action={
+              <button
+                type="button"
+                onClick={onRefresh}
+                className="text-xs text-[var(--accent)] hover:underline"
+              >
+                {loading ? "Снимаю…" : "Обновить"}
+              </button>
+            }
+          >
+            <HaproxyStatsView stats={stats[n.id] ?? null} loading={loading && !stats[n.id]} />
+          </Panel>
+        ))
+      )}
     </div>
   );
 }

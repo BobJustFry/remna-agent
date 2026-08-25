@@ -319,6 +319,45 @@ enable_ipv6() {
   log "✓ IPv6 включён"
 }
 
+configure_conntrack_limits() {
+  # Cap nf_conntrack so small VPS don't OOM; persist across reboot.
+  local sysctl_file="/etc/sysctl.d/99-remnanode-conntrack.conf"
+  local modprobe_file="/etc/modprobe.d/nf_conntrack.conf"
+  local unit="/etc/systemd/system/remnanode-conntrack.service"
+  log "→ Лимиты nf_conntrack…"
+  $SUDO_CMD modprobe nf_conntrack >/dev/null 2>&1 || true
+  $SUDO_CMD sysctl -w net.netfilter.nf_conntrack_max=65536 >/dev/null 2>&1 || true
+  $SUDO_CMD sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=7200 >/dev/null 2>&1 || true
+  $SUDO_CMD sysctl -w net.netfilter.nf_conntrack_tcp_timeout_time_wait=30 >/dev/null 2>&1 || true
+  if [ -e /sys/module/nf_conntrack/parameters/hashsize ]; then
+    echo 16384 | $SUDO_CMD tee /sys/module/nf_conntrack/parameters/hashsize >/dev/null 2>&1 || true
+  fi
+  $SUDO_CMD tee "$sysctl_file" >/dev/null <<'EOF'
+net.netfilter.nf_conntrack_max = 65536
+net.netfilter.nf_conntrack_tcp_timeout_established = 7200
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+EOF
+  $SUDO_CMD sysctl -p "$sysctl_file" >/dev/null 2>&1 || true
+  echo "options nf_conntrack hashsize=16384" | $SUDO_CMD tee "$modprobe_file" >/dev/null
+  $SUDO_CMD tee "$unit" >/dev/null <<'EOF'
+[Unit]
+Description=RemnaNode nf_conntrack hashsize
+After=network-pre.target
+DefaultDependencies=no
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'modprobe nf_conntrack 2>/dev/null || true; if [ -e /sys/module/nf_conntrack/parameters/hashsize ]; then echo 16384 > /sys/module/nf_conntrack/parameters/hashsize; fi'
+RemainAfterExit=yes
+TimeoutStartSec=10
+[Install]
+WantedBy=multi-user.target
+EOF
+  $SUDO_CMD systemctl daemon-reload >/dev/null 2>&1 || true
+  $SUDO_CMD systemctl enable remnanode-conntrack.service >/dev/null 2>&1 || true
+  $SUDO_CMD systemctl start remnanode-conntrack.service >/dev/null 2>&1 || true
+  log "✓ nf_conntrack max=65536 hashsize=16384 timeouts established=7200 time_wait=30"
+}
+
 ensure_docker() {
   if command -v docker >/dev/null 2>&1; then
     log "→ Docker уже установлен"
@@ -388,6 +427,7 @@ clean_remnanode() {
 }
 
 do_host_tuning_for_install() {
+  configure_conntrack_limits || true
   if [ "$SWAP" = "1" ]; then configure_swap "$SWAP_SIZE" || true; fi
   if [ "$MTU_DDOS" = "1" ]; then configure_mtu_1450 || true; else configure_mtu_1500 || true; fi
   if [ "$DISABLE_IPV6" = "1" ]; then disable_ipv6 || true; else enable_ipv6 || true; fi
@@ -443,6 +483,7 @@ do_update() {
 
 do_tune() {
   log "=== Настройка параметров хоста ==="
+  configure_conntrack_limits || true
   case "$TUNE_MTU" in
     on) configure_mtu_1450 || true ;;
     off) configure_mtu_1500 || true ;;

@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { api, type RemnaScriptAction, type RemnaScriptRunBody } from "../api/client";
 import type { NodeItem } from "../types";
+import { ResizableDialog } from "./ResizableDialog";
 
 type Props = {
   nodes: NodeItem[];
@@ -93,9 +94,14 @@ export function RemnaScriptDialog({ nodes, action, onClose, onConfirm }: Props) 
   }
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/60 p-0 backdrop-blur-sm sm:items-center sm:p-4">
-      <div className="flex max-h-[min(100dvh,900px)] w-full max-w-lg flex-col overflow-hidden rounded-t-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] shadow-2xl sm:rounded-[var(--radius)]">
-        <div className="border-b border-[var(--border)] px-5 py-4">
+    <ResizableDialog
+      storageKey={`remna-script-${action}`}
+      defaultWidth={640}
+      defaultHeight={760}
+      minWidth={480}
+      minHeight={420}
+    >
+        <div className="shrink-0 border-b border-[var(--border)] px-5 py-4">
           <h2 className="text-base font-semibold">{title}</h2>
           {!bulk && (
             <p className="mt-1 font-mono text-xs text-[var(--muted)]">
@@ -104,7 +110,7 @@ export function RemnaScriptDialog({ nodes, action, onClose, onConfirm }: Props) 
           )}
         </div>
 
-        <div className="space-y-3 overflow-y-auto px-5 py-4 text-sm">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4 text-sm">
           {bulk && (
             <div className="max-h-28 overflow-auto rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-xs">
               {nodes.map((n) => (
@@ -272,7 +278,7 @@ export function RemnaScriptDialog({ nodes, action, onClose, onConfirm }: Props) 
           {error && <div className="text-sm text-[var(--danger)]">{error}</div>}
         </div>
 
-        <div className="flex justify-end gap-2 border-t border-[var(--border)] px-5 py-4">
+        <div className="flex shrink-0 justify-end gap-2 border-t border-[var(--border)] px-5 py-4 pr-7">
           <button type="button" onClick={onClose} className={btnGhost}>
             Отмена
           </button>
@@ -281,8 +287,7 @@ export function RemnaScriptDialog({ nodes, action, onClose, onConfirm }: Props) 
             {bulk ? ` (${nodes.length})` : ""}
           </button>
         </div>
-      </div>
-    </div>
+    </ResizableDialog>
   );
 }
 

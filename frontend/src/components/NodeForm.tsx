@@ -4,6 +4,7 @@ import { COUNTRIES } from "../lib/countries";
 import type { HostingItem, NodeFormValues, NodeItem } from "../types";
 import { CountryFlag } from "./CountryFlag";
 import { HostingLogo } from "./HostingLogo";
+import { ResizableDialog } from "./ResizableDialog";
 
 type Props = {
   open: boolean;
@@ -135,8 +136,14 @@ export function NodeForm({
     (keyFileName?.toLowerCase().endsWith(".ppk") ?? false);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/55 p-0 backdrop-blur-sm sm:items-center sm:p-4">
-      <div className="flex max-h-[min(100dvh,920px)] w-full max-w-xl flex-col rounded-t-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] shadow-2xl sm:rounded-[var(--radius)]">
+    <ResizableDialog
+      storageKey="node-form"
+      defaultWidth={720}
+      defaultHeight={800}
+      minWidth={500}
+      minHeight={440}
+      zClass="z-50"
+    >
         <div className="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-4 py-4 sm:px-5">
           <h2 className="text-base font-semibold">{editing ? "Редактировать ноду" : "Добавить ноду"}</h2>
           <button type="button" onClick={onClose} className="text-[var(--muted)] hover:text-[var(--text)]">
@@ -145,7 +152,7 @@ export function NodeForm({
         </div>
 
         <form
-          className="grid flex-1 gap-3 overflow-y-auto px-4 py-4 sm:px-5"
+          className="grid min-h-0 flex-1 gap-3 overflow-y-auto px-4 py-4 sm:px-5"
           onSubmit={(e) => {
             e.preventDefault();
             setLocalError(null);
@@ -374,7 +381,7 @@ export function NodeForm({
             </div>
           )}
 
-          <div className="flex justify-end gap-2 pt-2">
+          <div className="flex justify-end gap-2 pt-2 pr-2">
             <button type="button" onClick={onClose} className={btnGhost}>
               Отмена
             </button>
@@ -383,8 +390,7 @@ export function NodeForm({
             </button>
           </div>
         </form>
-      </div>
-    </div>
+    </ResizableDialog>
   );
 }
 

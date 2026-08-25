@@ -18,7 +18,15 @@ export function ScriptJobLogDialog({ job, onClose, onCancel, onDismiss }: Props)
   }, [job.lines]);
 
   const actionLabel =
-    job.action === "install" ? "Установка RemnaNode" : job.action === "reinstall" ? "Переустановка" : "Параметры";
+    job.action === "warp"
+      ? "Установка WARP"
+      : job.action === "install"
+        ? "Установка RemnaNode"
+        : job.action === "reinstall"
+          ? "Переустановка"
+          : job.action === "update"
+            ? "Обновление RemnaNode"
+            : "Параметры";
 
   return (
     <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/60 p-0 backdrop-blur-sm sm:items-center sm:p-4">

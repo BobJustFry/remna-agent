@@ -46,6 +46,7 @@ function mergeAgentStatuses(
 export function useNodesAgents(enabled: boolean) {
   const [statuses, setStatuses] = useState<AgentMap>({});
   const [latestAgentVersion, setLatestAgentVersion] = useState<string | null>(null);
+  const [latestWgcfVersion, setLatestWgcfVersion] = useState<string | null>(null);
   const inFlight = useRef(false);
   const failStreaks = useRef(new Map<string, number>());
 
@@ -56,6 +57,7 @@ export function useNodesAgents(enabled: boolean) {
       const data = await api.agents();
       setStatuses((prev) => mergeAgentStatuses(prev, data.statuses, failStreaks.current));
       if (data.latest_agent_version) setLatestAgentVersion(data.latest_agent_version);
+      if (data.latest_wgcf_version) setLatestWgcfVersion(data.latest_wgcf_version);
     } catch {
       // keep previous
     } finally {
@@ -72,5 +74,5 @@ export function useNodesAgents(enabled: boolean) {
     return () => window.clearInterval(id);
   }, [enabled, refresh]);
 
-  return { statuses, latestAgentVersion, refresh };
+  return { statuses, latestAgentVersion, latestWgcfVersion, refresh };
 }

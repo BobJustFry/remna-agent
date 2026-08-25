@@ -75,3 +75,17 @@ export function agentNeedsUpdate(
 ): boolean {
   return versionNeedsUpdate(installed, latestAgent);
 }
+
+/** WARP missing, unknown wgcf version, or not equal to GitHub latest wgcf. */
+export function warpNeedsInstall(
+  agent: { warp_present?: boolean | null; warp_version?: string | null } | undefined,
+  latestWgcf: string | null | undefined,
+): boolean {
+  if (!agent || agent.warp_present == null) return false;
+  if (!agent.warp_present) return true;
+  const inst = normalizeVersion(agent.warp_version);
+  const latest = normalizeVersion(latestWgcf);
+  if (!inst) return true;
+  if (!latest) return false;
+  return inst !== latest;
+}

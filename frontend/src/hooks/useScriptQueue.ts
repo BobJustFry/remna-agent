@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { api, type RemnaScriptRunBody, type ScriptStreamEvent } from "../api/client";
+import { api, type ScriptQueueBody, type ScriptStreamEvent } from "../api/client";
 import { getQueueConcurrency } from "../lib/concurrency";
 import type { NodeItem } from "../types";
 
@@ -11,20 +11,26 @@ export type ScriptJob = {
   nodeName: string;
   host: string;
   sshLabel: string;
-  action: RemnaScriptRunBody["action"];
+  action: ScriptQueueBody["action"];
   phase: ScriptPhase;
   lines: string[];
   statusMessage: string | null;
-  body: RemnaScriptRunBody;
+  body: ScriptQueueBody;
 };
 
-export function useScriptQueue() {
+type Options = {
+  onIdle?: () => void;
+};
+
+export function useScriptQueue(opts?: Options) {
   const [jobs, setJobs] = useState<Record<string, ScriptJob>>({});
   const abortsRef = useRef(new Map<string, AbortController>());
   const runningRef = useRef(new Set<string>());
   const queueRef = useRef<string[]>([]);
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
+  const onIdleRef = useRef(opts?.onIdle);
+  onIdleRef.current = opts?.onIdle;
 
   const patchJob = useCallback((jobKey: string, patch: Partial<ScriptJob>) => {
     setJobs((prev) => {
@@ -51,6 +57,9 @@ export function useScriptQueue() {
       if (!job || job.phase !== "queued") continue;
       void startJob(jobKey);
     }
+    if (runningRef.current.size === 0 && queueRef.current.length === 0) {
+      onIdleRef.current?.();
+    }
   };
 
   async function startJob(jobKey: string) {
@@ -62,20 +71,29 @@ export function useScriptQueue() {
     patchJob(jobKey, { phase: "running", lines: [], statusMessage: null });
 
     try {
-      await api.runScriptStream(job.nodeId, job.body, {
-        signal: ac.signal,
-        onEvent: (ev: ScriptStreamEvent) => {
-          if (ac.signal.aborted) return;
-          if (ev.type === "log") appendLines(jobKey, [ev.line]);
-          else if (ev.type === "done") {
-            appendLines(jobKey, ["", `✓ ${ev.message}`]);
-            patchJob(jobKey, { phase: "done", statusMessage: ev.message });
-          } else if (ev.type === "error") {
-            appendLines(jobKey, ["", `✗ ${ev.message}`]);
-            patchJob(jobKey, { phase: "error", statusMessage: ev.message });
-          }
-        },
-      });
+      const onEvent = (ev: ScriptStreamEvent) => {
+        if (ac.signal.aborted) return;
+        if (ev.type === "log") appendLines(jobKey, [ev.line]);
+        else if (ev.type === "done") {
+          appendLines(jobKey, ["", `✓ ${ev.message}`]);
+          patchJob(jobKey, { phase: "done", statusMessage: ev.message });
+        } else if (ev.type === "error") {
+          appendLines(jobKey, ["", `✗ ${ev.message}`]);
+          patchJob(jobKey, { phase: "error", statusMessage: ev.message });
+        }
+      };
+      if (job.body.action === "warp") {
+        await api.installWarpStream(job.nodeId, {
+          signal: ac.signal,
+          force: job.body.force,
+          onEvent,
+        });
+      } else {
+        await api.runScriptStream(job.nodeId, job.body, {
+          signal: ac.signal,
+          onEvent,
+        });
+      }
     } catch (err) {
       const aborted =
         ac.signal.aborted ||
@@ -96,7 +114,7 @@ export function useScriptQueue() {
     }
   }
 
-  const enqueue = useCallback((nodes: NodeItem[], body: RemnaScriptRunBody): string[] => {
+  const enqueue = useCallback((nodes: NodeItem[], body: ScriptQueueBody): string[] => {
     if (nodes.length === 0) return [];
     const keys: string[] = [];
     setJobs((prev) => {
