@@ -102,6 +102,8 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 
 API (`8000`) и Postgres наружу не публикуются. Пароль админа не должен совпадать с root SSH.
 
+Если на VPS уже есть Caddy на 80/443 (как geodat.bob4.fun), **не** поднимайте второй Caddy: оверлей подключает `web` к сети `bob4fun-geodat-editor_default`, а в существующий Caddyfile добавляется сайт `ragent.bob4.fun` → `remna-agent-web:80`.
+
 ## Структура
 
 ```

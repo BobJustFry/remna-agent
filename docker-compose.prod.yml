@@ -1,9 +1,9 @@
-# Production stack: Caddy terminates TLS (Let's Encrypt automatic HTTPS).
+# Production overlay. Do not publish API/Postgres.
+# This VPS already has Caddy (bob4fun-geodat-editor) on :80/:443 —
+# attach `web` to that network and add ragent.bob4.fun to that Caddyfile.
 # https://caddyserver.com/docs/automatic-https
 #
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-#
-# API and Postgres stay on the Docker network. Only 80/443 are published.
 
 services:
   api:
@@ -24,21 +24,13 @@ services:
     ports: !reset []
     expose:
       - "80"
+    networks:
+      default: {}
+      edge:
+        aliases:
+          - remna-agent-web
 
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    depends_on:
-      - web
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-
-volumes:
-  caddy_data:
-  caddy_config:
+networks:
+  edge:
+    external: true
+    name: bob4fun-geodat-editor_default

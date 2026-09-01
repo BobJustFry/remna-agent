@@ -1,6 +1,7 @@
-# Public hostname activates Automatic HTTPS (Let's Encrypt / ZeroSSL).
+# Site block for the existing Caddy on this VPS
+# (/opt/bob4fun-geodat-editor/Caddyfile). Do not run a second Caddy on :80/:443.
 # https://caddyserver.com/docs/automatic-https
 ragent.bob4.fun {
 	encode gzip
-	reverse_proxy web:80
+	reverse_proxy remna-agent-web:80
 }
