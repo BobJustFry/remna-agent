@@ -20,16 +20,17 @@ export function NodeMetricSpark({ times, values, color, maxY, fromTs, toTs }: Pr
   const dataMax = Math.max(...nums);
   const max = Math.max(maxY ?? dataMax, dataMax, 1);
   const pts: string[] = [];
+  let last = nums[nums.length - 1];
+  let lastT = toTs;
   values.forEach((v, i) => {
     const t = times[i];
     if (v == null || !Number.isFinite(v) || t == null) return;
     const x = 1 + ((t - fromTs) / span) * (w - 2);
     const y = h - 1.5 - (v / max) * (h - 3);
     pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    last = v;
+    lastT = t;
   });
-  const lastI = values.reduce((acc, v, i) => (v != null ? i : acc), -1);
-  const last = lastI >= 0 ? (values[lastI] as number) : nums[nums.length - 1];
-  const lastT = lastI >= 0 ? times[lastI] : toTs;
   const lastX = 1 + ((lastT - fromTs) / span) * (w - 2);
   const lastY = h - 1.5 - (last / max) * (h - 3);
   return (
