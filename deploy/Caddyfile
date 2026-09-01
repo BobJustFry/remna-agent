@@ -3,5 +3,8 @@
 # https://caddyserver.com/docs/automatic-https
 ragent.bob4.fun {
 	encode gzip
-	reverse_proxy remna-agent-web:80
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	reverse_proxy remna-agent-web:80 {
+		header_down -Server
+	}
 }
