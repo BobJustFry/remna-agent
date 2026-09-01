@@ -26,12 +26,16 @@ type Props = {
 
 export function NodeMetricsGrid({ nodes, statuses, agentStatuses }: Props) {
   const [series, setSeries] = useState<Record<string, MetricPoint[]>>({});
+  const [fromTs, setFromTs] = useState(() => Date.now() / 1000 - 86400);
+  const [toTs, setToTs] = useState(() => Date.now() / 1000);
   const [openId, setOpenId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       const data = await api.nodeMetrics("day");
       setSeries(data.series ?? {});
+      setFromTs(data.from_ts);
+      setToTs(data.to_ts);
     } catch {
       /* keep last */
     }
@@ -53,6 +57,8 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses }: Props) {
             key={node.id}
             node={node}
             points={series[node.id] ?? []}
+            fromTs={fromTs}
+            toTs={toTs}
             status={statuses[node.id]}
             agent={agentStatuses[node.id]}
             onOpen={() => setOpenId(node.id)}
@@ -65,6 +71,8 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses }: Props) {
           status={statuses[openNode.id]}
           agent={agentStatuses[openNode.id]}
           dayPoints={series[openNode.id] ?? []}
+          dayFromTs={fromTs}
+          dayToTs={toTs}
           onClose={() => setOpenId(null)}
         />
       )}
@@ -75,12 +83,16 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses }: Props) {
 function NodeTile({
   node,
   points,
+  fromTs,
+  toTs,
   status,
   agent,
   onOpen,
 }: {
   node: NodeItem;
   points: MetricPoint[];
+  fromTs: number;
+  toTs: number;
   status: OnlineMap[string] | undefined;
   agent: AgentMap[string] | undefined;
   onOpen: () => void;
@@ -88,6 +100,7 @@ function NodeTile({
   const pingLive = status?.online ? status.latency_ms : null;
   const cpuLive = agent?.present ? agent.cpu_percent : null;
   const diskLive = agent?.present ? agent.disk_percent : null;
+  const times = points.map((p) => p.t);
   return (
     <article className="relative flex min-h-[148px] flex-col rounded-md border border-[var(--border)] bg-[var(--bg-elevated)] px-1.5 py-1">
       <div className="flex min-w-0 items-center gap-1 pr-5">
@@ -111,20 +124,29 @@ function NodeTile({
           label="пинг"
           value={fmtMs(pingLive)}
           color={PING}
+          times={times}
           values={points.map((p) => p.ping_ms)}
+          fromTs={fromTs}
+          toTs={toTs}
         />
         <SparkRow
           label="CPU"
           value={fmtPct(cpuLive)}
           color={CPU}
+          times={times}
           values={points.map((p) => p.cpu_percent)}
+          fromTs={fromTs}
+          toTs={toTs}
           maxY={100}
         />
         <SparkRow
           label="диск"
           value={fmtPct(diskLive)}
           color={DISK}
+          times={times}
           values={points.map((p) => p.disk_percent)}
+          fromTs={fromTs}
+          toTs={toTs}
           maxY={100}
         />
       </div>
@@ -136,13 +158,19 @@ function SparkRow({
   label,
   value,
   color,
+  times,
   values,
+  fromTs,
+  toTs,
   maxY,
 }: {
   label: string;
   value: string;
   color: string;
+  times: number[];
   values: Array<number | null>;
+  fromTs: number;
+  toTs: number;
   maxY?: number;
 }) {
   return (
@@ -154,7 +182,14 @@ function SparkRow({
         </div>
       </div>
       <div className="min-w-0 flex-1">
-        <NodeMetricSpark values={values} color={color} maxY={maxY} />
+        <NodeMetricSpark
+          times={times}
+          values={values}
+          color={color}
+          maxY={maxY}
+          fromTs={fromTs}
+          toTs={toTs}
+        />
       </div>
     </div>
   );
@@ -165,16 +200,22 @@ function NodeMetricModal({
   status,
   agent,
   dayPoints,
+  dayFromTs,
+  dayToTs,
   onClose,
 }: {
   node: NodeItem;
   status: OnlineMap[string] | undefined;
   agent: AgentMap[string] | undefined;
   dayPoints: MetricPoint[];
+  dayFromTs: number;
+  dayToTs: number;
   onClose: () => void;
 }) {
   const [range, setRange] = useState<MetricsRange>("day");
   const [points, setPoints] = useState<MetricPoint[]>(dayPoints);
+  const [fromTs, setFromTs] = useState(dayFromTs);
+  const [toTs, setToTs] = useState(dayToTs);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -189,13 +230,18 @@ function NodeMetricModal({
     let cancelled = false;
     if (range === "day") {
       setPoints(dayPoints);
+      setFromTs(dayFromTs);
+      setToTs(dayToTs);
       return;
     }
     setLoading(true);
     void api
       .nodeMetricsOne(node.id, range)
       .then((data) => {
-        if (!cancelled) setPoints(data.series[node.id] ?? []);
+        if (cancelled) return;
+        setPoints(data.series[node.id] ?? []);
+        setFromTs(data.from_ts);
+        setToTs(data.to_ts);
       })
       .catch(() => {
         if (!cancelled) setPoints([]);
@@ -206,23 +252,30 @@ function NodeMetricModal({
     return () => {
       cancelled = true;
     };
-  }, [node.id, range, dayPoints]);
+  }, [node.id, range, dayPoints, dayFromTs, dayToTs]);
 
   const times = points.map((p) => p.t);
   const load = agent?.loadavg;
+  const chart = {
+    times,
+    xMin: fromTs,
+    xMax: toTs,
+    height: 128,
+    formatY: (n: number) => String(Math.round(n)),
+  };
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-stretch justify-center bg-black/65 p-2 backdrop-blur-[2px] sm:p-3"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]"
       onClick={onClose}
     >
       <div
         role="dialog"
         aria-modal="true"
-        className="flex h-full w-full max-w-[1600px] flex-col overflow-hidden rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)]"
+        className="flex w-full max-w-[880px] max-h-[min(90dvh,760px)] flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--border)] px-3 py-2 sm:px-4">
+        <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--border)] px-4 py-2.5">
           <CountryFlag code={node.country_code} size={16} />
           <h2 className="text-base font-semibold text-[var(--text)]">{node.name}</h2>
           <span className="font-mono text-xs text-[var(--muted)]">{node.host}</span>
@@ -253,7 +306,7 @@ function NodeMetricModal({
           </div>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-auto px-3 py-3 sm:px-4">
+        <div className="overflow-auto px-4 py-3">
           <dl className="mb-3 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] sm:grid-cols-4 lg:grid-cols-8">
             <Fact label="пинг" value={fmtMs(status?.online ? status.latency_ms : null)} />
             <Fact label="CPU" value={fmtPct(agent?.present ? agent.cpu_percent : null)} />
@@ -286,48 +339,40 @@ function NodeMetricModal({
 
           {loading && <p className="mb-2 text-xs text-[var(--muted)]">Загрузка периода…</p>}
 
-          <div className="grid gap-3 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
             <ChartBlock title="Пинг" unit="мс">
               <NodeMetricLineChart
-                times={times}
+                {...chart}
                 values={points.map((p) => p.ping_ms)}
                 color={PING}
                 unit="мс"
-                formatY={(n) => String(Math.round(n))}
               />
             </ChartBlock>
             <ChartBlock title="CPU" unit="%">
               <NodeMetricLineChart
-                times={times}
+                {...chart}
                 values={points.map((p) => p.cpu_percent)}
                 color={CPU}
                 unit="%"
                 maxY={100}
-                formatY={(n) => String(Math.round(n))}
               />
             </ChartBlock>
             <ChartBlock title="Диск" unit="%">
               <NodeMetricLineChart
-                times={times}
+                {...chart}
                 values={points.map((p) => p.disk_percent)}
                 color={DISK}
                 unit="%"
                 maxY={100}
-                formatY={(n) => String(Math.round(n))}
               />
             </ChartBlock>
-          </div>
-
-          <div className="mt-3">
             <ChartBlock title="RAM" unit="%">
               <NodeMetricLineChart
-                times={times}
+                {...chart}
                 values={points.map((p) => p.mem_percent)}
                 color={MEM}
                 unit="%"
                 maxY={100}
-                height={140}
-                formatY={(n) => String(Math.round(n))}
               />
             </ChartBlock>
           </div>

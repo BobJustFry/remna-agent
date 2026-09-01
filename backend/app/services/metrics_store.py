@@ -75,7 +75,7 @@ async def fetch_series(
     *,
     range_key: MetricRange,
     node_id: uuid.UUID | None = None,
-) -> tuple[int, dict[str, list[dict]]]:
+) -> tuple[int, float, float, dict[str, list[dict]]]:
     now = datetime.now(timezone.utc)
     window = _RANGE_WINDOW[range_key]
     step = _RANGE_STEP[range_key]
@@ -88,17 +88,18 @@ async def fetch_series(
         oldest_q = oldest_q.where(NodeMetricSample.recorded_at >= since)
     oldest = (await db.execute(oldest_q)).scalar_one_or_none()
 
-    if range_key == "all" and since is None:
+    if range_key == "all":
         if oldest is not None:
             if oldest.tzinfo is None:
                 oldest = oldest.replace(tzinfo=timezone.utc)
             span = max(60.0, (now - oldest).total_seconds())
             step = max(60, int(span / _MAX_POINTS))
-    elif oldest is not None:
-        if oldest.tzinfo is None:
-            oldest = oldest.replace(tzinfo=timezone.utc)
-        span = max(30.0, (now - oldest).total_seconds())
-        step = min(step, max(30, int(span / 80)))
+            since = oldest
+        else:
+            since = now - timedelta(days=1)
+
+    from_ts = since.timestamp() if since is not None else now.timestamp() - 86400
+    to_ts = now.timestamp()
 
     epoch = func.extract("epoch", NodeMetricSample.recorded_at)
     bucket = (func.floor(epoch / float(step)) * float(step)).label("t")
@@ -132,4 +133,4 @@ async def fetch_series(
                 "disk_percent": _round(disk_percent),
             }
         )
-    return step, series
+    return step, from_ts, to_ts, series

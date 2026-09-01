@@ -1,10 +1,13 @@
 type Props = {
+  times: number[];
   values: Array<number | null>;
   color: string;
   maxY?: number;
+  fromTs: number;
+  toTs: number;
 };
 
-export function NodeMetricSpark({ values, color, maxY }: Props) {
+export function NodeMetricSpark({ times, values, color, maxY, fromTs, toTs }: Props) {
   const nums = values.filter((v): v is number => v != null && Number.isFinite(v));
   if (nums.length < 1) {
     return (
@@ -13,22 +16,22 @@ export function NodeMetricSpark({ values, color, maxY }: Props) {
   }
   const w = 200;
   const h = 28;
-  const min = 0;
+  const span = Math.max(1, toTs - fromTs);
   const dataMax = Math.max(...nums);
   const max = Math.max(maxY ?? dataMax, dataMax, 1);
-  const span = max - min || 1;
-  const n = values.length;
-  const step = n > 1 ? (w - 2) / (n - 1) : w;
   const pts: string[] = [];
   values.forEach((v, i) => {
-    if (v == null || !Number.isFinite(v)) return;
-    const x = 1 + i * step;
-    const y = h - 1.5 - ((v - min) / span) * (h - 3);
+    const t = times[i];
+    if (v == null || !Number.isFinite(v) || t == null) return;
+    const x = 1 + ((t - fromTs) / span) * (w - 2);
+    const y = h - 1.5 - (v / max) * (h - 3);
     pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
   });
-  const last = nums[nums.length - 1];
-  const lastX = 1 + (n - 1) * step;
-  const lastY = h - 1.5 - ((last - min) / span) * (h - 3);
+  const lastI = values.reduce((acc, v, i) => (v != null ? i : acc), -1);
+  const last = lastI >= 0 ? (values[lastI] as number) : nums[nums.length - 1];
+  const lastT = lastI >= 0 ? times[lastI] : toTs;
+  const lastX = 1 + ((lastT - fromTs) / span) * (w - 2);
+  const lastY = h - 1.5 - (last / max) * (h - 3);
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className="block h-full w-full" preserveAspectRatio="none" aria-hidden>
       <polyline

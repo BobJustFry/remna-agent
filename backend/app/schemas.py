@@ -172,6 +172,8 @@ class MetricPointOut(BaseModel):
 class NodesMetricsResponse(BaseModel):
     range: str
     step_sec: int
+    from_ts: float
+    to_ts: float
     series: dict[str, list[MetricPointOut]]
 
 

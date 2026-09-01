@@ -175,8 +175,8 @@ async def nodes_metrics(
     _: str = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> NodesMetricsResponse:
-    step, series = await fetch_series(db, range_key=range_key)
-    return NodesMetricsResponse(range=range_key, step_sec=step, series=series)
+    step, from_ts, to_ts, series = await fetch_series(db, range_key=range_key)
+    return NodesMetricsResponse(range=range_key, step_sec=step, from_ts=from_ts, to_ts=to_ts, series=series)
 
 
 # Avoid hammering SSH when token stays broken (seconds).
@@ -396,8 +396,8 @@ async def node_metrics(
     db: AsyncSession = Depends(get_db),
 ) -> NodesMetricsResponse:
     await _get_node(db, node_id)
-    step, series = await fetch_series(db, range_key=range_key, node_id=node_id)
-    return NodesMetricsResponse(range=range_key, step_sec=step, series=series)
+    step, from_ts, to_ts, series = await fetch_series(db, range_key=range_key, node_id=node_id)
+    return NodesMetricsResponse(range=range_key, step_sec=step, from_ts=from_ts, to_ts=to_ts, series=series)
 
 
 @router.patch("/{node_id}", response_model=NodeOut)

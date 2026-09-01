@@ -4,6 +4,9 @@
 Credentials come from the environment, never from the repo:
 
   DEPLOY_HOST  DEPLOY_USER  DEPLOY_PASSWORD  DEPLOY_DOMAIN
+
+If /opt/remna-agent/.env already exists, it is kept (update deploy).
+A new .env is generated only on first install.
 """
 
 from __future__ import annotations
@@ -53,17 +56,12 @@ def sh(client: paramiko.SSHClient, command: str, timeout: int = 120) -> str:
     return text
 
 
-def main() -> int:
-    domain = os.environ.get("DEPLOY_DOMAIN", "ragent.bob4.fun")
-    SECRETS.mkdir(parents=True, exist_ok=True)
-    archive = SECRETS / "remna-agent.tar.gz"
-    run(["git", "archive", "--format=tar.gz", "-o", str(archive), "HEAD"])
-
+def build_env(domain: str) -> str:
     admin_password = secrets.token_urlsafe(18)
     session_secret = secrets.token_hex(32)
     enc_key = secrets.token_hex(32)
     pg_password = secrets.token_hex(24)
-    env_text = "\n".join(
+    return "\n".join(
         [
             "ADMIN_USERNAME=admin",
             f"ADMIN_PASSWORD={admin_password}",
@@ -86,42 +84,52 @@ def main() -> int:
             "",
         ]
     )
-    env_path = SECRETS / "ragent.env"
-    env_path.write_text(env_text, encoding="utf-8")
-    try:
-        os.chmod(env_path, 0o600)
-    except OSError:
-        pass
+
+
+def main() -> int:
+    domain = os.environ.get("DEPLOY_DOMAIN", "ragent.bob4.fun")
+    SECRETS.mkdir(parents=True, exist_ok=True)
+    archive = SECRETS / "remna-agent.tar.gz"
+    run(["git", "archive", "--format=tar.gz", "-o", str(archive), "HEAD"])
 
     client = connect()
     try:
-        print(sh(client, "uname -a; command -v docker; ss -lnt | sed -n '1,20p'"))
-        print(sh(
-            client,
-            "mkdir -p /opt/remna-agent",
-            timeout=30,
-        ))
-
+        print(sh(client, "mkdir -p /opt/remna-agent; test -f /opt/remna-agent/.env && echo HAS_ENV || echo NEW_ENV"))
         sftp = client.open_sftp()
         sftp.put(str(archive), "/tmp/remna-agent.tar.gz")
         sftp.close()
 
-        print(sh(
-            client,
-            "rm -rf /opt/remna-agent/* /opt/remna-agent/.[!.]* 2>/dev/null || true; "
-            "tar -xzf /tmp/remna-agent.tar.gz -C /opt/remna-agent; "
-            "rm -f /tmp/remna-agent.tar.gz; "
-            "ls -la /opt/remna-agent | head",
-            timeout=60,
-        ))
+        extract = r"""
+set -euo pipefail
+cd /opt
+if [ -f remna-agent/.env ]; then
+  cp -a remna-agent/.env /tmp/remna-agent.env.bak
+fi
+# overlay code; never delete data/postgres
+tar -xzf /tmp/remna-agent.tar.gz -C remna-agent
+rm -f /tmp/remna-agent.tar.gz
+if [ -f /tmp/remna-agent.env.bak ]; then
+  cp -a /tmp/remna-agent.env.bak remna-agent/.env
+  rm -f /tmp/remna-agent.env.bak
+  echo KEPT_ENV
+else
+  echo NEED_ENV
+fi
+"""
+        extract_out = sh(client, extract, timeout=60)
+        print(extract_out)
 
-        sftp = client.open_sftp()
-        with sftp.file("/opt/remna-agent/.env", "w") as fh:
-            fh.write(env_text)
-        sftp.chmod("/opt/remna-agent/.env", 0o600)
-        sftp.close()
+        if "NEED_ENV" in extract_out:
+            env_text = build_env(domain)
+            env_path = SECRETS / "ragent.env"
+            env_path.write_text(env_text, encoding="utf-8")
+            sftp = client.open_sftp()
+            with sftp.file("/opt/remna-agent/.env", "w") as fh:
+                fh.write(env_text)
+            sftp.chmod("/opt/remna-agent/.env", 0o600)
+            sftp.close()
+            print(f"wrote first-install .env, copy at {env_path}")
 
-        caddy_snippet = (ROOT / "deploy" / "Caddyfile").read_text(encoding="utf-8")
         print(sh(
             client,
             "python3 - <<'PY'\n"
@@ -129,8 +137,6 @@ def main() -> int:
             "p = Path('/opt/bob4fun-geodat-editor/Caddyfile')\n"
             "text = p.read_text()\n"
             "if 'ragent.bob4.fun' not in text:\n"
-            "    backup = p.with_name('Caddyfile.bak-remna')\n"
-            "    backup.write_text(text)\n"
             "    extra = Path('/opt/remna-agent/deploy/Caddyfile').read_text()\n"
             "    p.write_text(text.rstrip() + '\\n\\n' + extra.strip() + '\\n')\n"
             "    print('caddyfile: appended ragent.bob4.fun')\n"
@@ -152,14 +158,11 @@ def main() -> int:
         ))
         time.sleep(8)
         print(sh(client, "cd /opt/remna-agent && docker compose -f docker-compose.yml -f docker-compose.prod.yml ps"))
-        print(sh(client, "cd /opt/remna-agent && docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=50 api web"))
+        print(sh(client, "cd /opt/remna-agent && docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=30 api web"))
     finally:
         client.close()
 
     print(f"URL=https://{domain}")
-    print("ADMIN_USERNAME=admin")
-    print(f"ADMIN_PASSWORD={admin_password}")
-    print(f"ENV_COPY={env_path}")
     return 0
 
 

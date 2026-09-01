@@ -96,6 +96,8 @@ export type MetricPoint = {
 export type NodesMetricsResponse = {
   range: MetricsRange;
   step_sec: number;
+  from_ts: number;
+  to_ts: number;
   series: Record<string, MetricPoint[]>;
 };
 
