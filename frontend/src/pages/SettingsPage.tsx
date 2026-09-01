@@ -54,6 +54,23 @@ export function SettingsPage() {
         ) : (
           <div className="mx-auto max-w-xl space-y-4">
             <section className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] p-4">
+              <h2 className="text-sm font-semibold">Данные графиков</h2>
+              <p className="mt-1 text-xs text-[var(--muted)]">
+                Стирает накопленную историю cf_204 / CPU / RAM / диск по всем нодам. Ноды, SSH и
+                настройки не трогает. После сброса графики начнут писаться заново (cf_204 — с агента
+                0.1.14+).
+              </p>
+              <button
+                type="button"
+                disabled={busy || resetBusy}
+                onClick={() => setResetOpen(true)}
+                className="mt-3 rounded-lg border border-[rgba(240,113,120,0.45)] px-3 py-1.5 text-sm font-semibold text-[var(--danger)] hover:bg-[rgba(240,113,120,0.12)] disabled:opacity-50"
+              >
+                Сбросить накопленные данные
+              </button>
+            </section>
+
+            <section className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] p-4">
               <h2 className="text-sm font-semibold">SECRET_KEY Remna</h2>
               <p className="mt-1 text-xs text-[var(--muted)]">
                 Ключ панели Remnawave. Подставляется при установке RemnaNode, если в диалоге поле пустое.
@@ -121,23 +138,6 @@ export function SettingsPage() {
                 className="mt-3 rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--text)] hover:bg-[var(--bg-row)] disabled:opacity-50"
               >
                 {remnawaveLoading ? "Обновление…" : "Обновить с GitHub"}
-              </button>
-            </section>
-
-            <section className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] p-4">
-              <h2 className="text-sm font-semibold">Данные графиков</h2>
-              <p className="mt-1 text-xs text-[var(--muted)]">
-                Стирает накопленную историю cf_204 / CPU / RAM / диск по всем нодам. Ноды, SSH и
-                настройки не трогает. После сброса графики начнут писаться заново (cf_204 — с агента
-                0.1.14+).
-              </p>
-              <button
-                type="button"
-                disabled={busy || resetBusy}
-                onClick={() => setResetOpen(true)}
-                className="mt-3 rounded-lg border border-[rgba(240,113,120,0.45)] px-3 py-1.5 text-sm font-semibold text-[var(--danger)] hover:bg-[rgba(240,113,120,0.12)] disabled:opacity-50"
-              >
-                Сбросить накопленные данные
               </button>
             </section>
 
