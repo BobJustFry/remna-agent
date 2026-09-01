@@ -1,0 +1,10 @@
+---
+description: Агенты нод remna-agent — не Windows probe-хаб
+alwaysApply: true
+---
+
+# Ноды ≠ probe-агент
+
+Агент в этой панели / на VPS (remnanode) — **не** хаб проверки подписки.
+
+Проверки `cf_204` / hostinfo идут в Docker-хаб **`http://127.0.0.1:3033`** (`vpn-probe-agent`), GUI на Home-PC. **`agent.vupen.fun` к этому хабу не относится.**

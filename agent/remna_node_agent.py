@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -15,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "0.1.14"
+VERSION = "0.1.15"
 STARTED_AT = time.time()
 _LAST_CPU = None
 _REMNA_VER_CACHE: tuple[float, bool, str | None] | None = None
@@ -34,7 +35,12 @@ _WARP_IFACES = ("warp", "CloudflareWARP", "WARP")
 _WARP_TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 _egress_lock = threading.Lock()
 _egress_state: dict = {"ok": None, "at": 0.0, "busy": False, "iface": None}
-_CF204_URL = "http://cp.cloudflare.com/generate_204"
+# 1.1.1.1, not cp.cloudflare.com DNS: that name often lands on 104.16.x with a
+# distant anycast PoP (Adman NSK → ~500 ms). 1.1.1.1 is the same generate_204
+# with Host set, usually the nearest Cloudflare (DME from ru-hy2).
+_CF204_IP = "1.1.1.1"
+_CF204_HOST = "cp.cloudflare.com"
+_CF204_PATH = "/generate_204"
 _CF204_INTERVAL = 20.0
 _cf204_lock = threading.Lock()
 _cf204_state: dict = {"ok": None, "ms": None, "at": 0.0}
@@ -768,11 +774,16 @@ def peers_info() -> dict:
 def _cf204_probe() -> tuple[bool, float | None]:
     t0 = time.perf_counter()
     try:
-        req = urllib.request.Request(_CF204_URL, method="GET")
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
-            code = int(resp.getcode() or 0)
+        conn = http.client.HTTPConnection(_CF204_IP, 80, timeout=3.0)
+        try:
+            conn.request("GET", _CF204_PATH, headers={"Host": _CF204_HOST})
+            resp = conn.getresponse()
+            code = int(resp.status)
+            resp.read()
             ms = round((time.perf_counter() - t0) * 1000.0, 1)
             return code in (200, 204), ms
+        finally:
+            conn.close()
     except Exception:
         return False, None
 
