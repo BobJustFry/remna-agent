@@ -58,3 +58,23 @@ textarea {
   background: #2a3a44;
   border-radius: 8px;
 }
+
+@keyframes ping-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+
+.ping-blink {
+  animation: ping-blink 0.85s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ping-blink {
+    animation: none;
+  }
+}

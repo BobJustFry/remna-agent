@@ -4,6 +4,7 @@ import type { AgentMap, MetricPoint, MetricsRange, NodeItem, OnlineMap } from ".
 import { CountryFlag } from "./CountryFlag";
 import { NodeMetricLineChart } from "./NodeMetricCharts";
 import { NodeMetricSpark } from "./NodeMetricSpark";
+import { pingToneClass } from "../lib/pingTone";
 import { OnlineBadge } from "./OnlineBadge";
 
 const PING = "#22d3bb";
@@ -123,6 +124,7 @@ function NodeTile({
         <SparkRow
           label="cf_204"
           value={fmtMs(pingLive)}
+          valueClass={pingToneClass(pingLive)}
           color={PING}
           times={times}
           values={points.map((p) => p.ping_ms)}
@@ -158,6 +160,7 @@ function SparkRow({
   label,
   value,
   color,
+  valueClass,
   times,
   values,
   fromTs,
@@ -167,6 +170,7 @@ function SparkRow({
   label: string;
   value: string;
   color: string;
+  valueClass?: string;
   times: number[];
   values: Array<number | null>;
   fromTs: number;
@@ -177,7 +181,10 @@ function SparkRow({
     <div className="flex min-h-0 items-stretch gap-1">
       <div className="w-[52px] shrink-0 leading-tight">
         <div className="text-[9px] uppercase tracking-wide text-[var(--muted)]">{label}</div>
-        <div className="truncate text-[11px] font-semibold tabular-nums" style={{ color }}>
+        <div
+          className={`truncate text-[11px] ${valueClass ?? "font-semibold tabular-nums"}`}
+          style={valueClass ? undefined : { color }}
+        >
           {value}
         </div>
       </div>
@@ -308,7 +315,11 @@ function NodeMetricModal({
 
         <div className="overflow-auto px-4 py-3">
           <dl className="mb-3 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] sm:grid-cols-4 lg:grid-cols-8">
-            <Fact label="cf_204" value={fmtMs(agent?.cf204_ok ? agent.cf204_ms : null)} />
+            <Fact
+              label="cf_204"
+              value={fmtMs(agent?.cf204_ok ? agent.cf204_ms : null)}
+              valueClass={pingToneClass(agent?.cf204_ok ? agent.cf204_ms : null)}
+            />
             <Fact label="CPU" value={fmtPct(agent?.present ? agent.cpu_percent : null)} />
             <Fact label="RAM" value={fmtPct(agent?.present ? agent.mem_percent : null)} />
             <Fact label="диск" value={fmtPct(agent?.present ? agent.disk_percent : null)} />
@@ -394,11 +405,11 @@ function ChartBlock({ title, unit, children }: { title: string; unit: string; ch
   );
 }
 
-function Fact({ label, value }: { label: string; value: string }) {
+function Fact({ label, value, valueClass }: { label: string; value: string; valueClass?: string }) {
   return (
     <div>
       <dt className="text-[var(--muted)]">{label}</dt>
-      <dd className="truncate font-medium tabular-nums text-[var(--text)]">{value}</dd>
+      <dd className={`truncate tabular-nums ${valueClass ?? "font-medium text-[var(--text)]"}`}>{value}</dd>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { pingToneClass } from "../lib/pingTone";
 import type { OnlineStatus } from "../types";
 
 type Props = {
@@ -35,16 +36,16 @@ export const OnlineBadge = memo(function OnlineBadge({ status, compact }: Props)
         />
         {compact ? (
           status.latency_ms != null ? (
-            <span className="font-normal tabular-nums text-[var(--muted)]">{Math.round(status.latency_ms)}</span>
+            <span className={pingToneClass(status.latency_ms)}>{Math.round(status.latency_ms)}</span>
           ) : (
-            "on"
+            <span className={pingToneClass(null)}>—</span>
           )
         ) : (
           <>
             Online
-            {status.latency_ms != null && (
-              <span className="font-normal text-[var(--muted)]">{status.latency_ms} ms</span>
-            )}
+            <span className={pingToneClass(status.latency_ms)}>
+              {status.latency_ms != null ? `${Math.round(status.latency_ms)} ms` : "—"}
+            </span>
           </>
         )}
       </span>
