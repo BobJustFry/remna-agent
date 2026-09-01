@@ -16,6 +16,7 @@ from app.services.agent_install import (
     _combined_text,
 )
 from app.services.ssh_client import SshConnectError, probe_tcp, ssh_connect
+from app.services.ssh_passwd import looks_like_password_expired
 
 
 @dataclass
@@ -66,6 +67,11 @@ def reboot_node_via_ssh(
         try:
             with client_cm as client:
                 code, out, err = _run(client, "id -u; id -un")
+                if looks_like_password_expired(_combined_text(out, err)):
+                    raise NodeRebootError(
+                        "Пароль истёк (PAM требует смену через TTY). "
+                        "Сначала установите агент — панель сменит пароль сама."
+                    )
                 if not _shell_usable(out, err, code):
                     denied = _looks_like_shell_denied(_combined_text(out, err))
                     last_error = denied or (out or err or "shell недоступен").strip()

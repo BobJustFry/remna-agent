@@ -15,15 +15,10 @@ from app.services.agent_install import (
     Privilege,
     _check_cancel,
     _detect_privilege,
-    _looks_like_shell_denied,
     _run,
-    _run_priv,
-    _shell_usable,
-    _ssh_candidates,
-    _combined_text,
-    _yield_output,
+    with_ready_ssh,
 )
-from app.services.ssh_client import SshConnectError, probe_tcp, ssh_connect
+from app.services.ssh_client import SshConnectError, probe_tcp
 
 DOCKER_SCRIPTS_DIR = Path("/app/scripts/remnanode")
 REPO_SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts" / "remnanode"
@@ -55,6 +50,7 @@ class RemnaScriptParams:
     tune_ports: bool = False
     tune_ipv6: str = "skip"  # disable|enable|skip
     skip_system_update: bool = True
+    cf_204_stub: bool = False
 
 
 def scripts_dir() -> Path:
@@ -170,6 +166,7 @@ def run_remnanode_script_via_ssh(
     private_key: str | None,
     params: RemnaScriptParams,
     cancel: threading.Event | None = None,
+    resolved_password: list[str] | None = None,
 ) -> Iterator[str]:
     script_body = runner_path().read_text(encoding="utf-8")
     if params.action in ("install", "reinstall") and not params.secret_key.strip():
@@ -184,104 +181,76 @@ def run_remnanode_script_via_ssh(
         raise RemnaScriptError(exc.message) from exc
     yield f"✓ Порт {ssh_port} открыт"
 
-    last_error: str | None = None
-    for idx, user in enumerate(_ssh_candidates(username)):
-        _check_cancel(cancel)
-        yield f"→ SSH {user}@{host}:{ssh_port}…"
+    def work(client, user: str, ssh_password: str | None) -> Iterator[str]:
+        priv: Privilege | None = None
         try:
-            client_cm = ssh_connect(
-                host=host,
-                port=ssh_port,
-                username=user,
-                auth_type=auth_type,
-                password=password,
-                private_key=private_key,
-            )
-        except SshConnectError as exc:
-            last_error = exc.message
-            yield f"✗ {exc.message}"
-            if idx + 1 < len(_ssh_candidates(username)):
-                continue
+            for item in _detect_privilege(client, password=ssh_password):
+                _check_cancel(cancel)
+                if isinstance(item, Privilege):
+                    priv = item
+                else:
+                    yield item
+        except AgentInstallError as exc:
+            raise RemnaScriptError(str(exc)) from exc
+        if priv is None:
+            raise RemnaScriptError("Не удалось определить права на ноде")
+
+        staging = f"/tmp/remnanode-run-{uuid.uuid4().hex[:10]}"
+        yield f"$ mkdir -p {staging}"
+        try:
+            _run(client, f"mkdir -p {shlex.quote(staging)}", check=True)
+        except AgentInstallError as exc:
             raise RemnaScriptError(exc.message) from exc
 
+        remote_script = f"{staging}/remnanode_runner.sh"
+        yield "→ Загрузка remnanode_runner.sh…"
+        sftp = client.open_sftp()
         try:
-            with client_cm as client:
-                yield "✓ SSH-сессия открыта"
-                code, out, err = _run(client, "id -u; id -un")
-                yield from _yield_output(out, err)
-                if not _shell_usable(out, err, code):
-                    denied = _looks_like_shell_denied(_combined_text(out, err))
-                    last_error = denied or (out or err or "shell недоступен").strip()
-                    yield f"✗ {last_error}"
-                    if idx + 1 < len(_ssh_candidates(username)):
-                        continue
-                    raise RemnaScriptError(last_error)
+            with sftp.file(remote_script, "w") as f:
+                f.write(script_body)
+        finally:
+            sftp.close()
+        _run(client, f"chmod 700 {shlex.quote(remote_script)}", check=True)
+        yield f"✓ {remote_script}"
 
-                priv: Privilege | None = None
-                try:
-                    for item in _detect_privilege(client, password=password):
-                        _check_cancel(cancel)
-                        if isinstance(item, Privilege):
-                            priv = item
-                        else:
-                            yield item
-                except AgentInstallError as exc:
-                    raise RemnaScriptError(str(exc)) from exc
-                if priv is None:
-                    raise RemnaScriptError("Не удалось определить права на ноде")
-
-                staging = f"/tmp/remnanode-run-{uuid.uuid4().hex[:10]}"
-                yield f"$ mkdir -p {staging}"
-                try:
-                    _run(client, f"mkdir -p {shlex.quote(staging)}", check=True)
-                except AgentInstallError as exc:
-                    raise RemnaScriptError(exc.message) from exc
-
-                remote_script = f"{staging}/remnanode_runner.sh"
-                yield "→ Загрузка remnanode_runner.sh…"
-                sftp = client.open_sftp()
-                try:
-                    with sftp.file(remote_script, "w") as f:
-                        f.write(script_body)
-                finally:
-                    sftp.close()
-                _run(client, f"chmod 700 {shlex.quote(remote_script)}", check=True)
-                yield f"✓ {remote_script}"
-
-                env_block = _env_exports(params)
-                run_cmd = (
-                    f"{env_block}\n"
-                    f"bash {shlex.quote(remote_script)}\n"
-                    f"ec=$?\n"
-                    f"rm -rf {shlex.quote(staging)}\n"
-                    f"exit $ec"
-                )
-                yield f"$ ACTION={params.action} NODE_PORT={params.node_port} bash remnanode_runner.sh"
-                try:
-                    for line in _stream_priv_command(
-                        client, priv, run_cmd, timeout=3600.0, cancel=cancel
-                    ):
-                        if "SECRET_KEY=" in line and "export" in line:
-                            continue
-                        yield line
-                except AgentInstallCancelled:
-                    raise
-                except RemnaScriptError:
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    if cancel and cancel.is_set():
-                        raise AgentInstallCancelled() from exc
-                    raise RemnaScriptError(str(exc) or type(exc).__name__) from exc
-
-                yield "✓ Скрипт выполнен"
-                return
-        except (RemnaScriptError, AgentInstallCancelled, AgentInstallError):
+        env_block = _env_exports(params)
+        run_cmd = (
+            f"{env_block}\n"
+            f"bash {shlex.quote(remote_script)}\n"
+            f"ec=$?\n"
+            f"rm -rf {shlex.quote(staging)}\n"
+            f"exit $ec"
+        )
+        yield f"$ ACTION={params.action} NODE_PORT={params.node_port} bash remnanode_runner.sh"
+        try:
+            for line in _stream_priv_command(
+                client, priv, run_cmd, timeout=3600.0, cancel=cancel
+            ):
+                if "SECRET_KEY=" in line and "export" in line:
+                    continue
+                yield line
+        except AgentInstallCancelled:
+            raise
+        except RemnaScriptError:
             raise
         except Exception as exc:  # noqa: BLE001
-            last_error = str(exc) or type(exc).__name__
-            yield f"✗ {last_error}"
-            if idx + 1 < len(_ssh_candidates(username)):
-                continue
-            raise RemnaScriptError(last_error) from exc
+            if cancel and cancel.is_set():
+                raise AgentInstallCancelled() from exc
+            raise RemnaScriptError(str(exc) or type(exc).__name__) from exc
 
-    raise RemnaScriptError(last_error or "Не удалось выполнить скрипт")
+        yield "✓ Скрипт выполнен"
+
+    try:
+        yield from with_ready_ssh(
+            host=host,
+            ssh_port=ssh_port,
+            username=username,
+            auth_type=auth_type,
+            password=password,
+            private_key=private_key,
+            work=work,
+            cancel=cancel,
+            resolved_password=resolved_password,
+        )
+    except AgentInstallError as exc:
+        raise RemnaScriptError(exc.message) from exc

@@ -28,6 +28,7 @@ const fallbackDefaults: RemnaScriptRunBody = {
   tune_ports: false,
   tune_ipv6: "skip",
   skip_system_update: true,
+  cf_204_stub: false,
 };
 
 export function RemnaScriptDialog({ nodes, action, onClose, onConfirm }: Props) {
@@ -60,6 +61,7 @@ export function RemnaScriptDialog({ nodes, action, onClose, onConfirm }: Props) 
           use_origin: d.use_origin,
           origin_domain: d.origin_domain ?? "",
           skip_system_update: d.skip_system_update,
+          cf_204_stub: d.cf_204_stub,
         });
       })
       .catch(() => undefined);
@@ -189,6 +191,11 @@ export function RemnaScriptDialog({ nodes, action, onClose, onConfirm }: Props) 
                 checked={!form.skip_system_update}
                 onChange={(v) => setForm((f) => ({ ...f, skip_system_update: !v }))}
                 label="apt update/upgrade"
+              />
+              <Toggle
+                checked={!!form.cf_204_stub}
+                onChange={(v) => setForm((f) => ({ ...f, cf_204_stub: v }))}
+                label="Заглушка cf_204 (proxy-ping без Cloudflare)"
               />
             </>
           )}

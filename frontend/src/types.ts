@@ -50,6 +50,8 @@ export type AgentStatus = {
   haproxy_up: boolean | null;
   haproxy_version: string | null;
   haproxy_listen: string | null;
+  proxy_peers: number | null;
+  proxy_conns: number | null;
   cpu_percent: number | null;
   mem_percent: number | null;
   disk_percent: number | null;
@@ -80,6 +82,22 @@ export type OnlineStatus = {
 };
 
 export type OnlineMap = Record<string, OnlineStatus>;
+
+export type MetricsRange = "day" | "week" | "month" | "all";
+
+export type MetricPoint = {
+  t: number;
+  ping_ms: number | null;
+  cpu_percent: number | null;
+  mem_percent: number | null;
+  disk_percent: number | null;
+};
+
+export type NodesMetricsResponse = {
+  range: MetricsRange;
+  step_sec: number;
+  series: Record<string, MetricPoint[]>;
+};
 
 export type SshCheckResult = {
   ok: boolean;

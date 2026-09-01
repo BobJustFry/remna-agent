@@ -1,3 +1,5 @@
+import secrets
+
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from app.config import settings
@@ -25,4 +27,14 @@ def verify_session_token(token: str) -> str | None:
 
 
 def check_credentials(username: str, password: str) -> bool:
-    return username == settings.admin_username and password == settings.admin_password
+    # FastAPI HTTP Basic: secrets.compare_digest against timing attacks
+    # https://fastapi.tiangolo.com/advanced/security/http-basic-auth/
+    user_ok = secrets.compare_digest(
+        username.encode("utf-8"),
+        settings.admin_username.encode("utf-8"),
+    )
+    pass_ok = secrets.compare_digest(
+        password.encode("utf-8"),
+        settings.admin_password.encode("utf-8"),
+    )
+    return user_ok and pass_ok

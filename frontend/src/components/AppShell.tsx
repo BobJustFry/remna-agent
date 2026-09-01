@@ -31,8 +31,9 @@ export type AppOutletContext = {
   refreshAgents: () => Promise<void>;
   openScriptRun: (nodes: NodeItem[], action: RemnaScriptAction) => void;
   openWarpInstall: (nodes: NodeItem[], force?: boolean) => void;
-  /** In-flight RemnaNode/WARP jobs (queued or running, including confirm dialog). */
-  scriptBusy: Record<string, { warp: boolean; remna: boolean }>;
+  openCf204Install: (nodes: NodeItem[]) => void;
+  /** In-flight RemnaNode/WARP/cf204 jobs (queued or running, including confirm dialog). */
+  scriptBusy: Record<string, { warp: boolean; remna: boolean; cf204: boolean }>;
   remnawaveVersions: RemnawaveVersions | null;
   remnawaveLoading: boolean;
   refreshRemnawaveVersions: (force?: boolean) => Promise<RemnawaveVersions | void>;
@@ -97,14 +98,20 @@ export function AppShell({ username, onLogout }: Props) {
     setWarpTargets({ nodes: targetNodes, force });
   }, []);
 
-  const scriptBusy: Record<string, { warp: boolean; remna: boolean }> = {};
+  const openCf204Install = useCallback((targetNodes: NodeItem[]) => {
+    if (targetNodes.length === 0) return;
+    scriptQueue.enqueue(targetNodes, { action: "cf204", patch_profile: true });
+  }, [scriptQueue]);
+
+  const scriptBusy: Record<string, { warp: boolean; remna: boolean; cf204: boolean }> = {};
   const markBusy = (nodeId: string) => {
-    if (!scriptBusy[nodeId]) scriptBusy[nodeId] = { warp: false, remna: false };
+    if (!scriptBusy[nodeId]) scriptBusy[nodeId] = { warp: false, remna: false, cf204: false };
     return scriptBusy[nodeId];
   };
   for (const j of scriptQueue.jobList) {
     if (j.phase !== "queued" && j.phase !== "running") continue;
     if (j.action === "warp") markBusy(j.nodeId).warp = true;
+    else if (j.action === "cf204") markBusy(j.nodeId).cf204 = true;
     else markBusy(j.nodeId).remna = true;
   }
   for (const n of warpTargets?.nodes ?? []) markBusy(n.id).warp = true;
@@ -124,6 +131,7 @@ export function AppShell({ username, onLogout }: Props) {
     refreshAgents,
     openScriptRun,
     openWarpInstall,
+    openCf204Install,
     scriptBusy,
     remnawaveVersions,
     remnawaveLoading,
@@ -134,7 +142,7 @@ export function AppShell({ username, onLogout }: Props) {
 
   const trayJobs = scriptQueue.jobList.map((j) => ({
     nodeId: j.jobKey,
-    nodeName: `${j.nodeName} · ${j.action === "warp" ? "WARP" : j.action}`,
+    nodeName: `${j.nodeName} · ${j.action === "warp" ? "WARP" : j.action === "cf204" ? "cf_204" : j.action}`,
     host: j.host,
     sshLabel: j.sshLabel,
     phase: j.phase,
@@ -144,9 +152,16 @@ export function AppShell({ username, onLogout }: Props) {
     installDeps: false,
   }));
   const trayHasWarp = scriptQueue.jobList.some((j) => j.action === "warp");
-  const trayHasRemna = scriptQueue.jobList.some((j) => j.action !== "warp");
+  const trayHasCf204 = scriptQueue.jobList.some((j) => j.action === "cf204");
+  const trayHasRemna = scriptQueue.jobList.some((j) => j.action !== "warp" && j.action !== "cf204");
   const trayTitle =
-    trayHasWarp && !trayHasRemna ? "WARP" : trayHasWarp ? "Задачи на нодах" : "Скрипты RemnaNode";
+    trayHasWarp && !trayHasRemna && !trayHasCf204
+      ? "WARP"
+      : trayHasCf204 && !trayHasRemna && !trayHasWarp
+        ? "Заглушка cf_204"
+        : trayHasWarp || trayHasCf204
+          ? "Задачи на нодах"
+          : "Скрипты RemnaNode";
 
   const latestNode = remnawaveVersions?.node_version;
 

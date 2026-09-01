@@ -7,6 +7,7 @@ type Props = {
   busy?: boolean;
   busyLabel?: string;
   danger?: boolean;
+  zClass?: string;
   onConfirm: () => void;
   onCancel: () => void;
 };
@@ -20,6 +21,7 @@ export function ConfirmDialog({
   busy,
   busyLabel = "Подождите…",
   danger = true,
+  zClass = "z-[60]",
   onConfirm,
   onCancel,
 }: Props) {
@@ -30,7 +32,7 @@ export function ConfirmDialog({
     : "rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#06221e] transition hover:brightness-110 disabled:opacity-60";
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm">
+    <div className={`fixed inset-0 ${zClass} flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm`}>
       <div
         role="dialog"
         aria-modal="true"

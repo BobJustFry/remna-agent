@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
-from app.models import AuthType
-from app.services.ssh_client import ssh_connect
+from app.services.ssh_client import run_command, ssh_connect
+from app.services.ssh_passwd import looks_like_password_expired
 
 
 @dataclass
@@ -30,7 +30,16 @@ def check_ssh_auth(
             private_key=private_key,
             timeout=timeout,
         ) as client:
-            client.exec_command("true", timeout=timeout)
+            _code, out, err = run_command(client, "id -u; id -un", timeout=timeout)
+            text = f"{out}\n{err}"
+            if looks_like_password_expired(text) or "no tty available" in text.lower():
+                return SshCheckResult(
+                    ok=True,
+                    message=(
+                        "SSH-OK, но пароль истёк — PAM требует смену через TTY. "
+                        "Установка агента сменит его сама."
+                    ),
+                )
         return SshCheckResult(ok=True, message="SSH-OK")
     except ValueError as exc:
         return SshCheckResult(ok=False, message=str(exc))

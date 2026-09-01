@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Literal
 
 from app.services.agent_reachability import check_agent_reachable
-from app.services.ssh_client import SshConnectError, probe_tcp, run_command, ssh_connect
+from app.services.ssh_client import (
+    PasswordChangeError,
+    SshConnectError,
+    change_expired_password_over_pty,
+    probe_tcp,
+    run_command,
+    ssh_connect,
+)
+from app.services.ssh_passwd import looks_like_password_expired
 
 
 class AgentInstallCancelled(Exception):
@@ -132,6 +140,12 @@ def _combined_text(out: str, err: str) -> str:
 
 def _looks_like_shell_denied(text: str) -> str | None:
     low = text.lower()
+    if looks_like_password_expired(text):
+        return (
+            "Пароль истёк: сервер требует смену через TTY. "
+            "Панель делает это сама при установке; если не вышло — "
+            "зайдите вручную: ssh -t user@host"
+        )
     if "please login as the user" in low:
         return (
             "SSH-сессия есть, но shell для этого пользователя запрещён "
@@ -294,10 +308,135 @@ def _ssh_candidates(username: str) -> list[str]:
 
 def _shell_usable(out: str, err: str, code: int) -> bool:
     text = _combined_text(out, err)
+    if looks_like_password_expired(text):
+        return False
     if _looks_like_shell_denied(text):
         return False
     lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
     return code == 0 and bool(lines) and lines[0].isdigit()
+
+
+def with_ready_ssh(
+    *,
+    host: str,
+    ssh_port: int,
+    username: str,
+    auth_type: str,
+    password: str | None,
+    private_key: str | None,
+    work,
+    cancel: threading.Event | None = None,
+    resolved_username: list[str] | None = None,
+    resolved_password: list[str] | None = None,
+) -> Iterator[str]:
+    """Connect, rotate an expired login password over PTY if needed, then run work.
+
+    `work(client, user, password)` must yield log lines. After a password rotation
+    the new secret is appended to `resolved_password` (caller persists it).
+    """
+    effective_password = password
+    password_rotated = False
+    last_error: str | None = None
+    candidates = _ssh_candidates(username)
+
+    for idx, user in enumerate(candidates):
+        reconnect = True
+        shell_denied = False
+        while reconnect:
+            reconnect = False
+            _check_cancel(cancel)
+            yield f"→ SSH {user}@{host}:{ssh_port}…"
+            try:
+                client_cm = ssh_connect(
+                    host=host,
+                    port=ssh_port,
+                    username=user,
+                    auth_type=auth_type,
+                    password=effective_password,
+                    private_key=private_key,
+                )
+            except SshConnectError as exc:
+                last_error = exc.message
+                yield f"✗ {exc.message}"
+                break
+
+            try:
+                with client_cm as client:
+                    yield "✓ SSH-сессия открыта"
+                    _check_cancel(cancel)
+
+                    yield "$ id -u; id -un"
+                    code, out, err = _run(client, "id -u; id -un")
+                    yield from _yield_output(out, err)
+                    text = _combined_text(out, err)
+
+                    if looks_like_password_expired(text):
+                        if not effective_password:
+                            raise AgentInstallError(
+                                "Пароль учётной записи истёк, а в карточке ноды нет пароля "
+                                f"(вход по ключу). Зайдите вручную: ssh -t {user}@{host}"
+                            )
+                        yield (
+                            "→ Пароль истёк (PAM требует смену, без TTY команда не проходит). "
+                            "Открываю PTY и меняю пароль…"
+                        )
+                        try:
+                            new_pw = change_expired_password_over_pty(
+                                client, current_password=effective_password
+                            )
+                        except PasswordChangeError as exc:
+                            raise AgentInstallError(exc.message) from exc
+                        if new_pw != effective_password:
+                            password_rotated = True
+                            yield "✓ Пароль сменён (новый сохраню в панели после установки)"
+                        else:
+                            yield "✓ Срок пароля сброшен (пароль тот же)"
+                        effective_password = new_pw
+                        reconnect = True
+                        yield "→ Переподключаюсь с обновлённым паролем…"
+                        continue
+
+                    if not _shell_usable(out, err, code):
+                        denied = _looks_like_shell_denied(text)
+                        last_error = denied or (out or err or "shell недоступен").strip()
+                        yield f"✗ {last_error}"
+                        shell_denied = True
+                        break
+
+                    if user != username:
+                        yield f"✓ Рабочий SSH-пользователь: {user} (вместо {username})"
+                    if resolved_username is not None:
+                        resolved_username.clear()
+                        resolved_username.append(user)
+                    if password_rotated and effective_password and resolved_password is not None:
+                        resolved_password.clear()
+                        resolved_password.append(effective_password)
+
+                    yield from work(client, user, effective_password)
+                    return
+            except (AgentInstallError, AgentInstallCancelled):
+                raise
+            except SshConnectError as exc:
+                last_error = exc.message
+                yield f"✗ {exc.message}"
+                break
+
+        if idx + 1 < len(candidates):
+            if shell_denied:
+                yield (
+                    "→ У этого пользователя нет shell (часто root на cloud-образах). "
+                    "Пробую другого…"
+                )
+            else:
+                yield "→ Пробую другого SSH-пользователя…"
+            continue
+        raise AgentInstallError(
+            last_error or "Не удалось подключиться ни под одним из типичных SSH-пользователей"
+        )
+
+    raise AgentInstallError(
+        last_error or "Не удалось подключиться ни под одним из типичных SSH-пользователей"
+    )
 
 
 def install_agent_via_ssh(
@@ -312,12 +451,14 @@ def install_agent_via_ssh(
     agent_port: int = AGENT_PORT_DEFAULT,
     install_deps: bool = False,
     resolved_username: list[str] | None = None,
+    resolved_password: list[str] | None = None,
     cancel: threading.Event | None = None,
 ) -> Iterator[str]:
     """Yield human-readable install log lines. Raises AgentInstallError on failure.
 
     If resolved_username is provided, appends the SSH user that actually worked
     (may differ from configured username after cloud root→ubuntu fallback).
+    If PAM forced a password change, resolved_password gets the new secret.
     """
     files_dir = agent_files_dir()
     agent_py = (files_dir / "remna_node_agent.py").read_text(encoding="utf-8")
@@ -338,194 +479,140 @@ def install_agent_via_ssh(
         raise AgentInstallError(exc.message) from exc
     yield f"✓ Порт {ssh_port} открыт"
 
-    candidates = _ssh_candidates(username)
-    last_error: str | None = None
-
-    for idx, user in enumerate(candidates):
+    def work(client, user: str, ssh_password: str | None) -> Iterator[str]:
         _check_cancel(cancel)
-        yield f"→ SSH {user}@{host}:{ssh_port}…"
-        try:
-            client_cm = ssh_connect(
-                host=host,
-                port=ssh_port,
-                username=user,
-                auth_type=auth_type,
-                password=password,
-                private_key=private_key,
+        priv: Privilege | None = None
+        for item in _detect_privilege(client, password=ssh_password):
+            _check_cancel(cancel)
+            if isinstance(item, Privilege):
+                priv = item
+            else:
+                yield item
+        if priv is None:
+            raise AgentInstallError("Не удалось определить права на ноде")
+
+        if install_deps:
+            yield "→ Режим: зависимости можно установить автоматически"
+        _check_cancel(cancel)
+        yield from _ensure_python3(client, priv, install_deps=install_deps)
+
+        _check_cancel(cancel)
+        yield "$ command -v systemctl"
+        code, out, err = _run(client, "command -v systemctl")
+        yield from _yield_output(out, err)
+        if code != 0 or not (out or "").strip().startswith("/"):
+            raise AgentInstallError(
+                "На ноде нет systemctl/systemd — агент сейчас ставится только как systemd unit."
             )
-        except SshConnectError as exc:
-            last_error = exc.message
-            yield f"✗ {exc.message}"
-            if idx + 1 < len(candidates):
-                yield "→ Пробую другого SSH-пользователя…"
-                continue
-            raise AgentInstallError(exc.message) from exc
 
+        _check_cancel(cancel)
+        staging = f"/tmp/remna-agent-install-{uuid.uuid4().hex[:10]}"
+        yield f"$ mkdir -p {staging}"
+        _run(client, f"mkdir -p {shlex.quote(staging)}", check=True)
+
+        _check_cancel(cancel)
+        yield "→ Загрузка файлов во временную папку…"
+        sftp = client.open_sftp()
         try:
-            with client_cm as client:
-                yield "✓ SSH-сессия открыта"
-                _check_cancel(cancel)
+            with sftp.file(f"{staging}/remna_node_agent.py", "w") as f:
+                f.write(agent_py)
+            yield f"✓ {staging}/remna_node_agent.py"
+            with sftp.file(f"{staging}/remna-agent.env", "w") as f:
+                f.write(env_file)
+            yield f"✓ {staging}/remna-agent.env"
+            with sftp.file(f"{staging}/remna-agent.service", "w") as f:
+                f.write(unit)
+            yield f"✓ {staging}/remna-agent.service"
+        finally:
+            sftp.close()
 
-                yield "$ id -u; id -un"
-                code, out, err = _run(client, "id -u; id -un")
-                yield from _yield_output(out, err)
-                if not _shell_usable(out, err, code):
-                    denied = _looks_like_shell_denied(_combined_text(out, err))
-                    last_error = denied or (out or err or "shell недоступен").strip()
-                    yield f"✗ {last_error}"
-                    if idx + 1 < len(candidates):
-                        yield (
-                            "→ У этого пользователя нет shell (часто root на cloud-образах). "
-                            "Пробую другого…"
-                        )
-                        continue
-                    raise AgentInstallError(
-                        last_error
-                        or "Не удалось найти SSH-пользователя с рабочим shell"
-                    )
+        install_cmd = (
+            f"mkdir -p /opt/remna-agent && "
+            f"cp {shlex.quote(staging + '/remna_node_agent.py')} /opt/remna-agent/remna_node_agent.py && "
+            f"cp {shlex.quote(staging + '/remna-agent.env')} /etc/remna-agent.env && "
+            f"cp {shlex.quote(staging + '/remna-agent.service')} /etc/systemd/system/remna-agent.service && "
+            f"chmod 755 /opt/remna-agent/remna_node_agent.py && "
+            f"chmod 600 /etc/remna-agent.env && "
+            f"rm -rf {shlex.quote(staging)}"
+        )
+        _check_cancel(cancel)
+        shown = priv.wrap(install_cmd) if priv.kind != "root" else install_cmd
+        yield f"$ {shown}"
+        code, out, err = _run_priv(client, priv, install_cmd, timeout=60)
+        yield from _yield_output(out, err)
+        if code != 0:
+            detail = (err or out or f"exit {code}").strip()
+            raise AgentInstallError(f"Не удалось скопировать файлы агента: {detail}")
+        yield "✓ Файлы установлены в /opt/remna-agent и systemd"
 
-                if user != username:
-                    yield f"✓ Рабочий SSH-пользователь: {user} (вместо {username})"
-                if resolved_username is not None:
-                    resolved_username.clear()
-                    resolved_username.append(user)
+        _check_cancel(cancel)
+        # enable --now does NOT restart an already-running unit — must restart
+        # so the process reloads REMNA_AGENT_TOKEN from the env file.
+        start_cmd = (
+            "systemctl daemon-reload && "
+            "systemctl enable remna-agent && "
+            "systemctl restart remna-agent && "
+            "systemctl is-active remna-agent"
+        )
+        shown = priv.wrap(start_cmd) if priv.kind != "root" else start_cmd
+        yield f"$ {shown}"
+        code, out, err = _run_priv(client, priv, start_cmd, timeout=90)
+        yield from _yield_output(out, err)
+        active = (out or "").strip().splitlines()[-1] if out.strip() else ""
+        if code != 0 or active != "active":
+            detail = (err or out or "не удалось запустить remna-agent").strip()
+            jcmd = "journalctl -u remna-agent -n 30 --no-pager"
+            yield f"$ {priv.wrap(jcmd) if priv.kind != 'root' else jcmd}"
+            _jcode, jout, jerr = _run_priv(client, priv, jcmd, timeout=30)
+            yield from _yield_output(jout, jerr)
+            raise AgentInstallError(f"Установка агента: {detail}")
 
-                _check_cancel(cancel)
-                # Password for sudo: prefer SSH password; for key-only ubuntu often has NOPASSWD.
-                priv: Privilege | None = None
-                for item in _detect_privilege(client, password=password):
-                    _check_cancel(cancel)
-                    if isinstance(item, Privilege):
-                        priv = item
-                    else:
-                        yield item
-                if priv is None:
-                    raise AgentInstallError("Не удалось определить права на ноде")
+        yield f"✓ remna-agent active (порт {agent_port}, права: {priv.label()}, user: {user})"
 
-                if install_deps:
-                    yield "→ Режим: зависимости можно установить автоматически"
-                _check_cancel(cancel)
-                yield from _ensure_python3(client, priv, install_deps=install_deps)
+        yield f"$ curl -sS -m 3 http://127.0.0.1:{agent_port}/health"
+        _hcode, hout, herr = _run(
+            client, f"curl -sS -m 3 http://127.0.0.1:{agent_port}/health || true"
+        )
+        yield from _yield_output(hout, herr)
+        if "ok" in (hout or "").lower():
+            yield "✓ Агент отвечает локально на ноде"
+        else:
+            yield "✗ Локальный /health не ответил — смотрите journalctl -u remna-agent"
 
-                _check_cancel(cancel)
-                yield "$ command -v systemctl"
-                code, out, err = _run(client, "command -v systemctl")
-                yield from _yield_output(out, err)
-                if code != 0 or not (out or "").strip().startswith("/"):
-                    raise AgentInstallError(
-                        "На ноде нет systemctl/systemd — агент сейчас ставится только как systemd unit."
-                    )
+        yield "$ (ufw status || true)"
+        _uc, uout, _ue = _run_priv(
+            client,
+            priv,
+            "bash -lc 'if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -qi active; "
+            f"then ufw allow {agent_port}/tcp comment remna-agent || true; ufw status | head -20; "
+            "else echo ufw_inactive_or_missing; fi'",
+            timeout=30,
+        )
+        yield from _yield_output(uout, "")
 
-                _check_cancel(cancel)
-                staging = f"/tmp/remna-agent-install-{uuid.uuid4().hex[:10]}"
-                yield f"$ mkdir -p {staging}"
-                _run(client, f"mkdir -p {shlex.quote(staging)}", check=True)
+        yield f"→ Проверка доступности с панели: {host}:{agent_port}…"
+        reach = check_agent_reachable(host, agent_port, timeout=5.0)
+        if reach.ok:
+            yield f"✓ {reach.message}"
+        else:
+            yield f"✗ {reach.message}"
+            yield (
+                "→ Агент на VPS запущен, но панель не достучалась снаружи. "
+                "Откройте входящий TCP "
+                f"{agent_port} в security group / firewall хостинга, затем подождите опрос."
+            )
 
-                _check_cancel(cancel)
-                yield "→ Загрузка файлов во временную папку…"
-                sftp = client.open_sftp()
-                try:
-                    with sftp.file(f"{staging}/remna_node_agent.py", "w") as f:
-                        f.write(agent_py)
-                    yield f"✓ {staging}/remna_node_agent.py"
-                    with sftp.file(f"{staging}/remna-agent.env", "w") as f:
-                        f.write(env_file)
-                    yield f"✓ {staging}/remna-agent.env"
-                    with sftp.file(f"{staging}/remna-agent.service", "w") as f:
-                        f.write(unit)
-                    yield f"✓ {staging}/remna-agent.service"
-                finally:
-                    sftp.close()
+        yield f"Готово: агент установлен и запущен на порту {agent_port}"
 
-                install_cmd = (
-                    f"mkdir -p /opt/remna-agent && "
-                    f"cp {shlex.quote(staging + '/remna_node_agent.py')} /opt/remna-agent/remna_node_agent.py && "
-                    f"cp {shlex.quote(staging + '/remna-agent.env')} /etc/remna-agent.env && "
-                    f"cp {shlex.quote(staging + '/remna-agent.service')} /etc/systemd/system/remna-agent.service && "
-                    f"chmod 755 /opt/remna-agent/remna_node_agent.py && "
-                    f"chmod 600 /etc/remna-agent.env && "
-                    f"rm -rf {shlex.quote(staging)}"
-                )
-                _check_cancel(cancel)
-                shown = priv.wrap(install_cmd) if priv.kind != "root" else install_cmd
-                yield f"$ {shown}"
-                code, out, err = _run_priv(client, priv, install_cmd, timeout=60)
-                yield from _yield_output(out, err)
-                if code != 0:
-                    detail = (err or out or f"exit {code}").strip()
-                    raise AgentInstallError(f"Не удалось скопировать файлы агента: {detail}")
-                yield "✓ Файлы установлены в /opt/remna-agent и systemd"
-
-                _check_cancel(cancel)
-                # enable --now does NOT restart an already-running unit — must restart
-                # so the process reloads REMNA_AGENT_TOKEN from the env file.
-                start_cmd = (
-                    "systemctl daemon-reload && "
-                    "systemctl enable remna-agent && "
-                    "systemctl restart remna-agent && "
-                    "systemctl is-active remna-agent"
-                )
-                shown = priv.wrap(start_cmd) if priv.kind != "root" else start_cmd
-                yield f"$ {shown}"
-                code, out, err = _run_priv(client, priv, start_cmd, timeout=90)
-                yield from _yield_output(out, err)
-                active = (out or "").strip().splitlines()[-1] if out.strip() else ""
-                if code != 0 or active != "active":
-                    detail = (err or out or "не удалось запустить remna-agent").strip()
-                    jcmd = "journalctl -u remna-agent -n 30 --no-pager"
-                    yield f"$ {priv.wrap(jcmd) if priv.kind != 'root' else jcmd}"
-                    _jcode, jout, jerr = _run_priv(client, priv, jcmd, timeout=30)
-                    yield from _yield_output(jout, jerr)
-                    raise AgentInstallError(f"Установка агента: {detail}")
-
-                yield f"✓ remna-agent active (порт {agent_port}, права: {priv.label()}, user: {user})"
-
-                yield f"$ curl -sS -m 3 http://127.0.0.1:{agent_port}/health"
-                hcode, hout, herr = _run(
-                    client, f"curl -sS -m 3 http://127.0.0.1:{agent_port}/health || true"
-                )
-                yield from _yield_output(hout, herr)
-                if "ok" in (hout or "").lower():
-                    yield "✓ Агент отвечает локально на ноде"
-                else:
-                    yield "✗ Локальный /health не ответил — смотрите journalctl -u remna-agent"
-
-                # Best-effort: open local firewall if ufw is active (won't replace cloud SG).
-                yield "$ (ufw status || true)"
-                _uc, uout, _ue = _run_priv(
-                    client,
-                    priv,
-                    "bash -lc 'if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -qi active; "
-                    f"then ufw allow {agent_port}/tcp comment remna-agent || true; ufw status | head -20; "
-                    "else echo ufw_inactive_or_missing; fi'",
-                    timeout=30,
-                )
-                yield from _yield_output(uout, "")
-
-                yield f"→ Проверка доступности с панели: {host}:{agent_port}…"
-                reach = check_agent_reachable(host, agent_port, timeout=5.0)
-                if reach.ok:
-                    yield f"✓ {reach.message}"
-                else:
-                    yield f"✗ {reach.message}"
-                    yield (
-                        "→ Агент на VPS запущен, но панель не достучалась снаружи. "
-                        "Откройте входящий TCP "
-                        f"{agent_port} в security group / firewall хостинга, затем подождите опрос."
-                    )
-
-                yield f"Готово: агент установлен и запущен на порту {agent_port}"
-                return
-        except AgentInstallError:
-            raise
-        except SshConnectError as exc:
-            last_error = exc.message
-            yield f"✗ {exc.message}"
-            if idx + 1 < len(candidates):
-                yield "→ Пробую другого SSH-пользователя…"
-                continue
-            raise AgentInstallError(exc.message) from exc
-
-    raise AgentInstallError(
-        last_error or "Не удалось подключиться ни под одним из типичных SSH-пользователей"
+    yield from with_ready_ssh(
+        host=host,
+        ssh_port=ssh_port,
+        username=username,
+        auth_type=auth_type,
+        password=password,
+        private_key=private_key,
+        work=work,
+        cancel=cancel,
+        resolved_username=resolved_username,
+        resolved_password=resolved_password,
     )

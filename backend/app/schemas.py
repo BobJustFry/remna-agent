@@ -9,8 +9,9 @@ AuthTypeLiteral = Literal["password", "private_key"]
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    # OWASP: cap password length to avoid hashing/compare DoS on huge bodies
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=256)
 
 
 class UserOut(BaseModel):
@@ -114,6 +115,8 @@ class AgentNodeStatus(BaseModel):
     haproxy_up: bool | None = None
     haproxy_version: str | None = None
     haproxy_listen: str | None = None
+    proxy_peers: int | None = None
+    proxy_conns: int | None = None
     cpu_percent: float | None = None
     mem_percent: float | None = None
     disk_percent: float | None = None
@@ -158,6 +161,20 @@ class NodesOnlineResponse(BaseModel):
     statuses: dict[str, NodeOnlineStatus]
 
 
+class MetricPointOut(BaseModel):
+    t: float
+    ping_ms: float | None = None
+    cpu_percent: float | None = None
+    mem_percent: float | None = None
+    disk_percent: float | None = None
+
+
+class NodesMetricsResponse(BaseModel):
+    range: str
+    step_sec: int
+    series: dict[str, list[MetricPointOut]]
+
+
 class SshCheckOut(BaseModel):
     ok: bool
     message: str
@@ -180,6 +197,7 @@ class RemnaScriptDefaults(BaseModel):
     use_origin: bool = False
     origin_domain: str | None = Field(default=None, max_length=255)
     skip_system_update: bool = True
+    cf_204_stub: bool = False
 
 
 class AppSettingsOut(BaseModel):
@@ -212,6 +230,11 @@ class RemnaScriptRunRequest(BaseModel):
     tune_ports: bool = False
     tune_ipv6: Literal["disable", "enable", "skip"] = "skip"
     skip_system_update: bool = True
+    cf_204_stub: bool = False
+
+
+class ProbeStubInstallRequest(BaseModel):
+    patch_profile: bool = True
 
 
 class WarpInstallRequest(BaseModel):
@@ -230,7 +253,7 @@ class DestLoopbackRequest(BaseModel):
     port: int = Field(default=18443, ge=1024, le=65535)
 
 
-HaproxyActionLiteral = Literal["install", "apply", "reload", "start", "stop"]
+HaproxyActionLiteral = Literal["install", "apply", "reload", "start", "stop", "uninstall"]
 HaproxyTemplateLiteral = Literal["minimal", "front-xhttp", "tcp"]
 
 

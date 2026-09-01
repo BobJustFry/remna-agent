@@ -6,7 +6,7 @@ type Props = {
 };
 
 export function LoginPage({ onSuccess }: Props) {
-  const [username, setUsername] = useState("admin");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -43,6 +43,9 @@ export function LoginPage({ onSuccess }: Props) {
             onChange={(e) => setUsername(e.target.value)}
             className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]"
             autoComplete="username"
+            autoCapitalize="none"
+            spellCheck={false}
+            maxLength={128}
             required
           />
         </label>
@@ -55,6 +58,7 @@ export function LoginPage({ onSuccess }: Props) {
             onChange={(e) => setPassword(e.target.value)}
             className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]"
             autoComplete="current-password"
+            maxLength={256}
             required
           />
         </label>

@@ -13,6 +13,7 @@ const emptyDefaults: RemnaScriptDefaults = {
   use_origin: false,
   origin_domain: "",
   skip_system_update: true,
+  cf_204_stub: false,
 };
 
 export function ScriptsPage() {
@@ -147,6 +148,11 @@ export function ScriptsPage() {
                 checked={!defaults.skip_system_update}
                 onChange={(v) => setDefaults((d) => ({ ...d, skip_system_update: !v }))}
                 label="apt update/upgrade"
+              />
+              <Toggle
+                checked={defaults.cf_204_stub}
+                onChange={(v) => setDefaults((d) => ({ ...d, cf_204_stub: v }))}
+                label="Заглушка cf_204 (proxy-ping без Cloudflare)"
               />
             </section>
 

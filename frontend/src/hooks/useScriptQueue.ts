@@ -88,6 +88,12 @@ export function useScriptQueue(opts?: Options) {
           force: job.body.force,
           onEvent,
         });
+      } else if (job.body.action === "cf204") {
+        await api.installCf204Stream(job.nodeId, {
+          signal: ac.signal,
+          patch_profile: job.body.patch_profile,
+          onEvent,
+        });
       } else {
         await api.runScriptStream(job.nodeId, job.body, {
           signal: ac.signal,

@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -65,6 +65,26 @@ class Node(Base):
     )
 
     hosting: Mapped[Hosting | None] = relationship(back_populates="nodes")
+    metric_samples: Mapped[list["NodeMetricSample"]] = relationship(
+        back_populates="node", cascade="all, delete-orphan"
+    )
+
+
+class NodeMetricSample(Base):
+    __tablename__ = "node_metric_samples"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    node_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("nodes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    online: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    ping_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cpu_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mem_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    disk_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    node: Mapped["Node"] = relationship(back_populates="metric_samples")
 
 
 class AppSetting(Base):

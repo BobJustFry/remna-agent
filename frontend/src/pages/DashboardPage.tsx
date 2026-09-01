@@ -5,12 +5,13 @@ import type { AppOutletContext } from "../components/AppShell";
 import { CountryFlag } from "../components/CountryFlag";
 import { HostingLogo } from "../components/HostingLogo";
 import { formatBytes, HaproxyStatsView } from "../components/HaproxyStatsView";
+import { NodeMetricsGrid } from "../components/NodeMetricsGrid";
 import { OnlineBadge } from "../components/OnlineBadge";
 import { agentNeedsUpdate, remnanodeNeedsUpdate } from "../hooks/useRemnawaveVersions";
 import { countryName } from "../lib/countries";
 import type { AgentStatus, NodeItem, OnlineStatus } from "../types";
 
-type DashTab = "overview" | "issues" | "load" | "geo" | "versions" | "haproxy";
+type DashTab = "tiles" | "overview" | "issues" | "load" | "geo" | "versions" | "haproxy";
 
 type IssueKind = "offline" | "no_agent" | "agent_down" | "token" | "port";
 
@@ -37,6 +38,7 @@ type VersionRow = {
 };
 
 const TABS: { id: DashTab; label: string }[] = [
+  { id: "tiles", label: "Ноды" },
   { id: "overview", label: "Обзор" },
   { id: "issues", label: "Проблемы" },
   { id: "load", label: "Нагрузка" },
@@ -45,7 +47,7 @@ const TABS: { id: DashTab; label: string }[] = [
   { id: "haproxy", label: "HAProxy" },
 ];
 
-const TAB_KEY = "remna.dashboard.tab";
+const TAB_KEY = "remna.dashboard.tab.v2";
 
 function readTab(): DashTab {
   try {
@@ -54,7 +56,7 @@ function readTab(): DashTab {
   } catch {
     /* ignore */
   }
-  return "overview";
+  return "tiles";
 }
 
 export function DashboardPage() {
@@ -156,12 +158,20 @@ export function DashboardPage() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex flex-col gap-3 border-b border-[var(--border)] px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+      <header
+        className={`flex flex-col gap-3 border-b border-[var(--border)] sm:flex-row sm:items-center sm:justify-between sm:px-6 ${
+          tab === "tiles" ? "px-3 py-2" : "px-4 py-4 sm:px-6"
+        }`}
+      >
         <div className="min-w-0">
-          <h1 className="text-xl font-semibold tracking-tight">Дашборд</h1>
-          <p className="mt-0.5 text-sm text-[var(--muted)]">
-            Сводка по нодам, агентам и RemnaNode.
-          </p>
+          <h1 className={`font-semibold tracking-tight ${tab === "tiles" ? "text-base" : "text-xl"}`}>
+            Дашборд
+          </h1>
+          {tab !== "tiles" && (
+            <p className="mt-0.5 text-sm text-[var(--muted)]">
+              Сводка по нодам, агентам и RemnaNode.
+            </p>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <button
@@ -233,7 +243,17 @@ export function DashboardPage() {
         </nav>
       </div>
 
-      <div className="flex-1 space-y-4 overflow-auto px-3 py-3 sm:px-6 sm:py-4">
+      <div
+        className={
+          tab === "tiles"
+            ? "min-h-0 flex-1 px-1.5 py-1.5"
+            : "flex-1 space-y-4 overflow-auto px-3 py-3 sm:px-6 sm:py-4"
+        }
+      >
+        {tab === "tiles" && (
+          <NodeMetricsGrid nodes={nodes} statuses={statuses} agentStatuses={agentStatuses} />
+        )}
+
         {tab === "overview" && (
           <>
             <section className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">

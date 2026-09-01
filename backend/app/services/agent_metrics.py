@@ -38,6 +38,8 @@ class AgentStatus:
     haproxy_up: bool | None = None
     haproxy_version: str | None = None
     haproxy_listen: str | None = None
+    proxy_peers: int | None = None
+    proxy_conns: int | None = None
     cpu_percent: float | None = None
     mem_percent: float | None = None
     disk_percent: float | None = None
@@ -167,6 +169,8 @@ async def _probe_once(
             haproxy_up=_as_bool(data.get("haproxy_up")),
             haproxy_version=_as_str(data.get("haproxy_version")),
             haproxy_listen=_as_str(data.get("haproxy_listen")),
+            proxy_peers=_as_int(data.get("proxy_peers")),
+            proxy_conns=_as_int(data.get("proxy_conns")),
             cpu_percent=data.get("cpu_percent"),
             mem_percent=data.get("mem_percent"),
             disk_percent=data.get("disk_percent"),

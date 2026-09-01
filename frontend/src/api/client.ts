@@ -1,9 +1,12 @@
 import type {
   AgentMap,
+  AgentStatus,
   AuthType,
   HostingItem,
+  MetricsRange,
   NodeFormValues,
   NodeItem,
+  NodesMetricsResponse,
   OnlineMap,
   SshCheckResult,
 } from "../types";
@@ -76,12 +79,25 @@ export const api = {
   getSecret: (id: string) =>
     request<{ auth_type: AuthType; secret: string }>(`/api/nodes/${id}/secret`),
   online: () => request<{ statuses: OnlineMap }>("/api/nodes/online"),
+  nodeMetrics: (range: MetricsRange = "day") =>
+    request<NodesMetricsResponse>(`/api/nodes/metrics?range=${range}`),
+  nodeMetricsOne: (id: string, range: MetricsRange = "day") =>
+    request<NodesMetricsResponse>(`/api/nodes/${id}/metrics?range=${range}`),
   agents: () =>
     request<{
       statuses: AgentMap;
       latest_agent_version: string;
       latest_wgcf_version: string | null;
     }>("/api/nodes/agents"),
+  agentsStream: (opts: {
+    onEvent: (event: AgentsStreamEvent) => void;
+    signal?: AbortSignal;
+  }) =>
+    streamNdjson<AgentsStreamEvent>("/api/nodes/agents/stream", {
+      method: "GET",
+      signal: opts.signal,
+      onEvent: opts.onEvent,
+    }),
   sshCheck: (id: string) =>
     request<SshCheckResult>(`/api/nodes/${id}/ssh-check`, { method: "POST" }),
   rebootNode: (id: string) =>
@@ -139,6 +155,20 @@ export const api = {
     streamNdjson(`/api/nodes/${id}/warp/install`, {
       method: "POST",
       body: JSON.stringify({ force: !!opts.force }),
+      signal: opts.signal,
+      onEvent: opts.onEvent,
+    }),
+  installCf204Stream: (
+    id: string,
+    opts: {
+      onEvent: (event: ScriptStreamEvent) => void;
+      signal?: AbortSignal;
+      patch_profile?: boolean;
+    },
+  ) =>
+    streamNdjson(`/api/nodes/${id}/probe-stub/install`, {
+      method: "POST",
+      body: JSON.stringify({ patch_profile: opts.patch_profile !== false }),
       signal: opts.signal,
       onEvent: opts.onEvent,
     }),
@@ -235,8 +265,8 @@ export type RemnawaveVersions = {
 };
 
 export type RemnaScriptAction = "install" | "reinstall" | "tune" | "update";
-export type ScriptQueueAction = RemnaScriptAction | "warp";
-export type HaproxyAction = "install" | "apply" | "reload" | "start" | "stop";
+export type ScriptQueueAction = RemnaScriptAction | "warp" | "cf204";
+export type HaproxyAction = "install" | "apply" | "reload" | "start" | "stop" | "uninstall";
 export type HaproxyTemplate = "minimal" | "front-xhttp" | "tcp";
 
 export type HaproxyRoute = {
@@ -370,6 +400,7 @@ export type RemnaScriptDefaults = {
   use_origin: boolean;
   origin_domain: string | null;
   skip_system_update: boolean;
+  cf_204_stub: boolean;
 };
 
 export type AppSettings = {
@@ -396,9 +427,10 @@ export type RemnaScriptRunBody = {
   tune_ports?: boolean;
   tune_ipv6?: "disable" | "enable" | "skip";
   skip_system_update?: boolean;
+  cf_204_stub?: boolean;
 };
 
-export type ScriptQueueBody = RemnaScriptRunBody | { action: "warp"; force?: boolean };
+export type ScriptQueueBody = RemnaScriptRunBody | { action: "warp"; force?: boolean } | { action: "cf204"; patch_profile?: boolean };
 
 export type ScriptStreamEvent =
   | { type: "log"; line: string }
@@ -470,6 +502,15 @@ export type AgentInstallStreamEvent =
       message: string;
       agent_port: number;
       node: NodeItem;
+    }
+  | { type: "error"; message: string };
+
+export type AgentsStreamEvent =
+  | { type: "node"; id: string; status: AgentStatus }
+  | {
+      type: "done";
+      latest_agent_version: string;
+      latest_wgcf_version: string | null;
     }
   | { type: "error"; message: string };
 

@@ -4,6 +4,10 @@ from dataclasses import dataclass
 
 from icmplib import async_ping
 
+# Online ping leaves the Docker VM via the Windows routing table. VupenVPN
+# (Wintun) answers ICMP for captured public IPs locally (~0–2 ms, TTL 64).
+# Host /32 bypasses: scripts/windows/sync-direct-routes.ps1
+
 
 @dataclass
 class PingResult:

@@ -14,6 +14,7 @@ from app.services.agent_install import (
     _shell_usable,
 )
 from app.services.ssh_client import SshConnectError, run_command, ssh_connect
+from app.services.ssh_passwd import looks_like_password_expired
 
 _TOKEN_RE = re.compile(r"^REMNA_AGENT_TOKEN=(.+)$", re.MULTILINE)
 
@@ -126,6 +127,12 @@ def repair_agent_auth_via_ssh(
             ) as client:
                 code, out, err = run_command(client, "id -u; id -un", timeout=10)
                 text = f"{out}\n{err}"
+                if looks_like_password_expired(text):
+                    last_error = (
+                        "Пароль истёк (PAM требует смену через TTY). "
+                        "Сначала установите агент — панель сменит пароль сама."
+                    )
+                    continue
                 denied = _looks_like_shell_denied(text)
                 if denied and not _shell_usable(out, err, code):
                     last_error = denied

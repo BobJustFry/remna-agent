@@ -24,10 +24,12 @@ type Props = {
   onReboot: (node: NodeItem) => void;
   onRemnaScript?: (node: NodeItem, action: RemnaScriptAction) => void;
   onInstallWarp?: (node: NodeItem, force?: boolean) => void;
+  onInstallCf204?: (node: NodeItem) => void;
   onManageHaproxy?: (node: NodeItem) => void;
   onPickDest?: (node: NodeItem) => void;
   onCapacityCheck?: (node: NodeItem) => void;
   warpBusy?: boolean;
+  cf204Busy?: boolean;
   haproxyBusy?: boolean;
   destBusy?: boolean;
   remnaBusy?: boolean;
@@ -52,10 +54,12 @@ export const NodeRow = memo(function NodeRow({
   onReboot,
   onRemnaScript,
   onInstallWarp,
+  onInstallCf204,
   onManageHaproxy,
   onPickDest,
   onCapacityCheck,
   warpBusy,
+  cf204Busy,
   haproxyBusy,
   destBusy,
   remnaBusy,
@@ -241,6 +245,19 @@ export const NodeRow = memo(function NodeRow({
                       : "WARP: установить"}
                 </button>
               </>
+            )}
+            {onInstallCf204 && (
+              <button
+                type="button"
+                className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--accent-dim)] disabled:opacity-50"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onInstallCf204(node);
+                }}
+                disabled={cf204Busy}
+              >
+                {cf204Busy ? "cf_204: установка…" : "Заглушка cf_204"}
+              </button>
             )}
             {onManageHaproxy && (
               <button
@@ -776,7 +793,7 @@ function VersionsCell({
               : agent.remnanode_running === false
                 ? "RemnaNode stopped"
                 : agent.remnanode_running
-                  ? "RemnaNode запущен; версия читается из баннера «Remnawave Node v…» — обновите агент до 0.1.4+"
+                  ? "RemnaNode запущен, версия не прочиталась — обновите агент до 0.1.12+"
                   : "RemnaNode: нет данных"
           }
         >
@@ -948,6 +965,9 @@ function AgentCell({
     `RAM ${fmt(agent.mem_percent)}%`,
     `Disk ${fmt(agent.disk_percent)}%`,
     agent.loadavg?.length ? `load ${agent.loadavg.map((x) => x.toFixed(2)).join(" · ")}` : null,
+    agent.proxy_peers != null
+      ? `клиенты ${agent.proxy_peers} · tcp ${agent.proxy_conns ?? "—"}`
+      : null,
     agent.error,
   ]
     .filter(Boolean)
@@ -957,6 +977,7 @@ function AgentCell({
     return (
       <div className={`min-w-0 truncate tabular-nums text-[var(--text)] ${text}`} title={title}>
         {fmt(agent.cpu_percent)}/{fmt(agent.mem_percent)}/{fmt(agent.disk_percent)}
+        {agent.proxy_peers != null ? ` · ${agent.proxy_peers}ip` : ""}
       </div>
     );
   }
@@ -969,6 +990,11 @@ function AgentCell({
       {agent.loadavg && agent.loadavg.length > 0 && (
         <div className="mt-0.5 text-[10px] text-[var(--muted)]">
           load {agent.loadavg.map((x) => x.toFixed(2)).join(" · ")}
+        </div>
+      )}
+      {agent.proxy_peers != null && (
+        <div className="mt-0.5 text-[10px] text-[var(--muted)]">
+          клиенты {agent.proxy_peers} · tcp {agent.proxy_conns ?? "—"}
         </div>
       )}
     </div>

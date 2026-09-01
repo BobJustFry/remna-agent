@@ -10,6 +10,7 @@ import {
 } from "../api/client";
 import type { NodeItem } from "../types";
 import { CapacityDialog } from "./CapacityDialog";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { ResizableDialog } from "./ResizableDialog";
 import { HaproxyStatsView } from "./HaproxyStatsView";
 
@@ -41,6 +42,7 @@ export function HaproxyDialog({ node, onClose, onBusyChange }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [checkOpen, setCheckOpen] = useState(false);
+  const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [tab, setTab] = useState<DialogTab>("config");
   const [live, setLive] = useState<HaproxyLiveStats | null>(null);
   const [liveLoading, setLiveLoading] = useState(false);
@@ -253,7 +255,8 @@ export function HaproxyDialog({ node, onClose, onBusyChange }: Props) {
         signal: ac.signal,
         onEvent,
       });
-      await refreshStatus();
+      const st = await refreshStatus();
+      if (action === "uninstall" && !st.installed) setConfig("");
     } catch (err) {
       const aborted =
         ac.signal.aborted ||
@@ -554,6 +557,14 @@ export function HaproxyDialog({ node, onClose, onBusyChange }: Props) {
           <button type="button" onClick={onClose} className={btnGhost}>
             {busy ? "В фоне" : "Закрыть"}
           </button>
+          <button
+            type="button"
+            onClick={() => setConfirmUninstall(true)}
+            className={btnDanger}
+            disabled={busy || loading}
+          >
+            Удалить
+          </button>
           {status?.installed && (
             <>
               <button type="button" onClick={() => void run("stop")} className={btnDanger} disabled={busy}>
@@ -585,6 +596,22 @@ export function HaproxyDialog({ node, onClose, onBusyChange }: Props) {
         </div>
     </ResizableDialog>
     {checkOpen && <CapacityDialog node={node} onClose={() => setCheckOpen(false)} />}
+    <ConfirmDialog
+      open={confirmUninstall}
+      zClass="z-[70]"
+      title="Удалить HAProxy?"
+      message={`С ноды «${node.name}» (${node.host}) снимем сервис, пакет и /etc/haproxy. BBR не трогаем.`}
+      confirmLabel="Удалить начисто"
+      busy={busy}
+      busyLabel="Удаляю…"
+      onCancel={() => {
+        if (!busy) setConfirmUninstall(false);
+      }}
+      onConfirm={() => {
+        setConfirmUninstall(false);
+        void run("uninstall");
+      }}
+    />
     </>
   );
 }

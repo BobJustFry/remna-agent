@@ -28,11 +28,12 @@ from app.services.agent_install import (
 )
 from app.services.remnanode_script import RemnaScriptError, _stream_priv_command
 from app.services.ssh_client import SshConnectError, probe_tcp, ssh_connect
+from app.services.ssh_passwd import looks_like_password_expired
 
 DOCKER_SCRIPTS_DIR = Path("/app/scripts/haproxy")
 REPO_SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts" / "haproxy"
 
-HaproxyAction = Literal["install", "apply", "reload", "start", "stop"]
+HaproxyAction = Literal["install", "apply", "reload", "start", "stop", "uninstall"]
 HaproxyTemplate = Literal["minimal", "front-xhttp", "tcp"]
 
 _BACKEND_RE = re.compile(r"^[A-Za-z0-9._\[\]:-]+:\d{1,5}$")
@@ -195,6 +196,8 @@ def effective_routes(params: HaproxyParams) -> list[HaproxyRoute]:
 
 
 def validate_params(params: HaproxyParams) -> None:
+    if params.action == "uninstall":
+        return
     if not 1 <= params.bind_port <= 65535:
         raise HaproxyScriptError("bind_port должен быть 1–65535")
     if params.template != "tcp" or not params.routes:
@@ -589,6 +592,12 @@ def _open_priv(
                 code, out, err = _run(client, "id -u; id -un")
                 if log is not None:
                     log.extend(_yield_output(out, err))
+                text = _combined_text(out, err)
+                if looks_like_password_expired(text):
+                    raise HaproxyScriptError(
+                        "Пароль истёк (PAM требует смену через TTY). "
+                        "Сначала установите агент — панель сменит пароль сама."
+                    )
                 if not _shell_usable(out, err, code):
                     denied = _looks_like_shell_denied(_combined_text(out, err))
                     last_error = denied or (out or err or "shell недоступен").strip()
@@ -939,6 +948,7 @@ def run_haproxy_script_via_ssh(
                 "reload": "перечитан",
                 "start": "запущен",
                 "stop": "остановлен",
+                "uninstall": "удалён",
             }.get(params.action, "готов")
             yield f"✓ HAProxy {verb}"
             return

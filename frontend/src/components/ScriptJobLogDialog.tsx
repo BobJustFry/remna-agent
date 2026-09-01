@@ -20,6 +20,8 @@ export function ScriptJobLogDialog({ job, onClose, onCancel, onDismiss }: Props)
   const actionLabel =
     job.action === "warp"
       ? "Установка WARP"
+      : job.action === "cf204"
+        ? "Заглушка cf_204"
       : job.action === "install"
         ? "Установка RemnaNode"
         : job.action === "reinstall"

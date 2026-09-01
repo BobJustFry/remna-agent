@@ -1,7 +1,7 @@
 #!/bin/bash
 # Install / apply / control HAProxy on a Debian/Ubuntu node.
 # Env:
-#   ACTION=install|apply|reload|start|stop|bbr
+#   ACTION=install|apply|reload|start|stop|uninstall|bbr
 #   FORCE=1              overwrite config / stop nginx|caddy on bind port
 #   HAPROXY_CFG_SRC=     uploaded config to install/apply
 #   BIND_PORT=           used only for conflict check (install)
@@ -273,6 +273,36 @@ stop)
   run systemctl stop haproxy
   log "✓ stop"
   ;;
+uninstall)
+  log "→ останавливаю haproxy"
+  run systemctl stop haproxy 2>/dev/null || true
+  run systemctl disable haproxy 2>/dev/null || true
+  run systemctl unmask haproxy 2>/dev/null || true
+  run pkill -TERM -x haproxy 2>/dev/null || true
+  sleep 0.4
+  run pkill -KILL -x haproxy 2>/dev/null || true
+  if command -v apt-get >/dev/null 2>&1; then
+    wait_apt || exit 1
+    log "→ apt-get purge haproxy"
+    run apt-get -o DPkg::Lock::Timeout=120 purge -y haproxy || true
+    wait_apt || true
+    run apt-get -o DPkg::Lock::Timeout=120 autoremove -y || true
+  else
+    log "⚠ apt-get нет — пакет не снимаю, чищу файлы"
+  fi
+  log "→ удаляю /etc/haproxy и хвосты"
+  run rm -rf /etc/haproxy /run/haproxy /var/lib/haproxy
+  run rm -f /etc/default/haproxy
+  run rm -rf /etc/systemd/system/haproxy.service.d
+  run rm -f /etc/systemd/system/haproxy.service
+  run systemctl daemon-reload 2>/dev/null || true
+  run systemctl reset-failed haproxy 2>/dev/null || true
+  if haproxy_bin >/dev/null 2>&1; then
+    log "⚠ бинарь $(haproxy_bin) остался — ставился не из apt"
+    exit 1
+  fi
+  log "✓ HAProxy снят начисто (BBR/fq не трогал)"
+  ;;
 bbr)
   configure_bbr
   ;;
@@ -283,6 +313,16 @@ bbr)
 esac
 
 sleep 0.4
+if [ "$ACTION" = "uninstall" ]; then
+  if haproxy_bin >/dev/null 2>&1 || [ -e /etc/haproxy ]; then
+    log "⚠ остатки: bin=$(haproxy_bin 2>/dev/null || echo нет) cfg=$([ -e /etc/haproxy ] && echo есть || echo нет)"
+    exit 1
+  fi
+  systemctl is-active haproxy >/dev/null 2>&1 && log "⚠ service: active" && exit 1
+  ss -lntp 2>/dev/null | grep -F haproxy && { log "⚠ процесс ещё слушает"; exit 1; } || true
+  log "Готово"
+  exit 0
+fi
 if bin=$(haproxy_bin); then
   log "✓ $($bin -v 2>&1 | head -n1)"
 fi

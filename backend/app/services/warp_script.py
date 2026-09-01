@@ -23,6 +23,7 @@ from app.services.agent_install import (
 )
 from app.services.remnanode_script import RemnaScriptError, _stream_priv_command
 from app.services.ssh_client import SshConnectError, probe_tcp, ssh_connect
+from app.services.ssh_passwd import looks_like_password_expired
 from app.services.wgcf_releases import (
     WGCF_FALLBACK_VERSION,
     get_wgcf_binary,
@@ -94,6 +95,12 @@ def run_warp_script_via_ssh(
                 yield "✓ SSH-сессия открыта"
                 code, out, err = _run(client, "id -u; id -un")
                 yield from _yield_output(out, err)
+                text = _combined_text(out, err)
+                if looks_like_password_expired(text):
+                    raise WarpScriptError(
+                        "Пароль истёк (PAM требует смену через TTY). "
+                        "Сначала установите агент — панель сменит пароль сама."
+                    )
                 if not _shell_usable(out, err, code):
                     denied = _looks_like_shell_denied(_combined_text(out, err))
                     last_error = denied or (out or err or "shell недоступен").strip()

@@ -55,6 +55,7 @@ export function NodesPage() {
     refreshAgents,
     openScriptRun,
     openWarpInstall,
+    openCf204Install,
     scriptBusy,
     remnawaveVersions,
     latestAgentVersion,
@@ -486,6 +487,13 @@ export function NodesPage() {
           )}
           <button
             type="button"
+            onClick={() => openCf204Install(selectedNodes.filter((n) => !scriptBusy[n.id]?.cf204))}
+            className="rounded-lg border border-[var(--accent)] bg-[var(--bg)] px-3 py-1.5 text-sm font-semibold text-[var(--accent)] transition hover:bg-[var(--accent-dim)]"
+          >
+            Заглушка cf_204
+          </button>
+          <button
+            type="button"
             onClick={() => setSelectedIds(new Set())}
             className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--text)]"
           >
@@ -752,10 +760,12 @@ export function NodesPage() {
               onReboot={(n) => setPendingReboot([n])}
               onRemnaScript={(n, action) => openScriptRun([n], action)}
               onInstallWarp={(n, force) => openWarpInstall([n], force)}
+              onInstallCf204={(n) => openCf204Install([n])}
               onManageHaproxy={(n) => setHaproxyNode(n)}
               onPickDest={(n) => setDestNode(n)}
               onCapacityCheck={(n) => setCapacityNode(n)}
               warpBusy={!!scriptBusy[node.id]?.warp}
+              cf204Busy={!!scriptBusy[node.id]?.cf204}
               haproxyBusy={haproxyBusyId === node.id}
               destBusy={destBusyId === node.id}
               remnaBusy={!!scriptBusy[node.id]?.remna}

@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "0.1.11"
+VERSION = "0.1.13"
 STARTED_AT = time.time()
 _LAST_CPU = None
 _REMNA_VER_CACHE: tuple[float, bool, str | None] | None = None
@@ -24,6 +24,9 @@ _WARP_CACHE: tuple[float, dict] | None = None
 _WARP_TTL = 60.0
 _HAPROXY_CACHE: tuple[float, dict] | None = None
 _HAPROXY_TTL = 20.0
+_PEERS_CACHE: tuple[float, dict] | None = None
+_PEERS_TTL = 8.0
+_PROXY_PROC = ("rw-core", "xray", "haproxy")
 _WARP_HANDSHAKE_MAX = 180
 _WARP_EGRESS_TTL = 180.0
 _SEMVER_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][\w.]+)?)$", re.I)
@@ -245,25 +248,40 @@ def _version_from_hub_digest(digest_ref: str) -> str | None:
 
 
 _RW_BANNER_RE = re.compile(r"Remnawave Node v(\d+\.\d+\.\d+(?:[-+][\w.]+)?)", re.I)
+# rspack 3.3.x: renderBox("Remnawave Node v".concat("3.3.2"), ...)
+_RW_CONCAT_RE = re.compile(
+    r"""Remnawave Node v["']\.concat\(["'](\d+\.\d+\.\d+(?:[-+][\w.]+)?)["']\)""",
+    re.I,
+)
+_RW_NODEVERSION_RE = re.compile(
+    r"""nodeVersion\s*=\s*["'](\d+\.\d+\.\d+(?:[-+][\w.]+)?)["']?"""
+)
 
 
 def _version_from_rwnode_banner(text: str | None) -> str | None:
     """Parse version from Remnawave Node start banner / baked __RWNODE_VERSION__.
 
     Source: remnawave/node rspack DefinePlugin(__RWNODE_VERSION__) + get-start-message.ts
-    → renders «Remnawave Node v{package.json version}».
+    → «Remnawave Node v{version}», or after minify: «Remnawave Node v».concat("3.3.2").
     """
     if not text:
         return None
-    m = _RW_BANNER_RE.search(text)
-    if not m:
-        return None
-    return _normalize_ver(m.group(1))
+    for rx in (_RW_BANNER_RE, _RW_CONCAT_RE):
+        m = rx.search(text)
+        if m:
+            ver = _normalize_ver(m.group(1))
+            if ver:
+                return ver
+    for m in _RW_NODEVERSION_RE.finditer(text):
+        ver = _normalize_ver(m.group(1))
+        if ver:
+            return ver
+    return None
 
 
 def _version_from_container() -> str | None:
     """Read version the way Remnawave Node itself exposes it."""
-    # 1) Baked banner string inside dist/main.js (compile-time __RWNODE_VERSION__)
+    # 1) Banner / concat / nodeVersion inside dist/main.js
     out = _docker_out(
         [
             "docker",
@@ -271,8 +289,9 @@ def _version_from_container() -> str | None:
             "remnanode",
             "sh",
             "-c",
-            "grep -aoE 'Remnawave Node v[0-9]+\\.[0-9]+\\.[0-9]+[-+[:alnum:].]*' "
-            "/opt/app/dist/main.js 2>/dev/null | head -1",
+            "grep -aoE 'Remnawave Node v.{0,80}' /opt/app/dist/main.js 2>/dev/null; "
+            "grep -aoE 'nodeVersion=.?[0-9]+\\.[0-9]+\\.[0-9]+[-+[:alnum:].]*' "
+            "/opt/app/dist/main.js 2>/dev/null | head -20",
         ],
         timeout=8,
     )
@@ -631,12 +650,124 @@ def haproxy_info() -> dict:
     return data
 
 
+def _ss_host_port(token: str) -> tuple[str, int] | None:
+    token = (token or "").strip()
+    if not token or token in (".", "*"):
+        return None
+    if token.startswith("["):
+        end = token.find("]")
+        if end < 0:
+            return None
+        host = token[1:end]
+        rest = token[end + 1 :]
+        if not rest.startswith(":"):
+            return None
+        try:
+            return host, int(rest[1:])
+        except ValueError:
+            return None
+    host, sep, port_s = token.rpartition(":")
+    if not sep:
+        return None
+    try:
+        return host, int(port_s)
+    except ValueError:
+        return None
+
+
+def _norm_ip(host: str) -> str:
+    h = host.strip().lower()
+    if h.startswith("::ffff:"):
+        h = h[7:]
+    return h.strip("[]")
+
+
+def _is_loopback_ip(host: str) -> bool:
+    h = _norm_ip(host)
+    return h in ("127.0.0.1", "::1", "localhost")
+
+
+def _addr_tokens(parts: list[str]) -> list[tuple[str, int]]:
+    found: list[tuple[str, int]] = []
+    for token in parts:
+        hp = _ss_host_port(token)
+        if hp:
+            found.append(hp)
+    return found
+
+
+def _proxy_listen_ports(ss_lnp: str) -> set[int]:
+    ports: set[int] = set()
+    for line in ss_lnp.splitlines():
+        if not any(name in line for name in _PROXY_PROC):
+            continue
+        addrs = _addr_tokens(line.split())
+        if not addrs:
+            continue
+        host, port = addrs[0]
+        if _is_loopback_ip(host):
+            continue
+        ports.add(port)
+    return ports
+
+
+def peers_info() -> dict:
+    """Unique remote IPs on public listen ports of rw-core / xray / haproxy.
+
+    Many TCP from one address count as one peer. Loopback (steal dest, origin
+    :10087) is skipped. Not Remnawave UUID users.
+    """
+    global _PEERS_CACHE
+    now = time.time()
+    if _PEERS_CACHE is not None and (now - _PEERS_CACHE[0]) < _PEERS_TTL:
+        return _PEERS_CACHE[1]
+
+    empty = {"proxy_peers": None, "proxy_conns": None}
+    lnp = _run_cmd(["ss", "-tlnp"], timeout=2.0)
+    if not lnp:
+        if _PEERS_CACHE is not None:
+            return _PEERS_CACHE[1]
+        _PEERS_CACHE = (now, empty)
+        return empty
+    ports = _proxy_listen_ports(lnp)
+    if not ports:
+        data = {"proxy_peers": 0, "proxy_conns": 0}
+        _PEERS_CACHE = (now, data)
+        return data
+
+    est = _run_cmd(["ss", "-tn", "state", "established"], timeout=2.0)
+    if not est:
+        if _PEERS_CACHE is not None:
+            return _PEERS_CACHE[1]
+        _PEERS_CACHE = (now, empty)
+        return empty
+
+    ips: set[str] = set()
+    conns = 0
+    for line in est.splitlines():
+        addrs = _addr_tokens(line.split())
+        if len(addrs) < 2:
+            continue
+        local, peer = addrs[0], addrs[1]
+        if local[1] not in ports:
+            continue
+        if _is_loopback_ip(peer[0]):
+            continue
+        ips.add(_norm_ip(peer[0]))
+        conns += 1
+
+    data = {"proxy_peers": len(ips), "proxy_conns": conns}
+    _PEERS_CACHE = (now, data)
+    return data
+
+
 def collect_metrics() -> dict:
     mem_total, mem_used, mem_percent = mem_stats()
     disk_total, disk_used, disk_percent = disk_stats("/")
     rn_running, rn_version = remnanode_info()
     warp = warp_info()
     haproxy = haproxy_info()
+    peers = peers_info()
     return {
         "version": VERSION,
         "uptime_sec": int(time.time() - STARTED_AT),
@@ -652,6 +783,7 @@ def collect_metrics() -> dict:
         "remnanode_version": rn_version,
         **warp,
         **haproxy,
+        **peers,
     }
 
 

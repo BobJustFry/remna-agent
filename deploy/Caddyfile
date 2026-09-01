@@ -1,0 +1,6 @@
+# Public hostname activates Automatic HTTPS (Let's Encrypt / ZeroSSL).
+# https://caddyserver.com/docs/automatic-https
+ragent.bob4.fun {
+	encode gzip
+	reverse_proxy web:80
+}

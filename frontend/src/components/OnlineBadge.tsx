@@ -20,7 +20,11 @@ export const OnlineBadge = memo(function OnlineBadge({ status, compact }: Props)
   }
 
   if (status.online) {
-    const title = status.latency_ms != null ? `Online · ${status.latency_ms} ms` : "Online";
+    const via = status.method ? ` · ${status.method}` : "";
+    const title =
+      status.latency_ms != null
+        ? `Online · ${status.latency_ms} ms${via}`
+        : `Online${via}`;
     return (
       <span
         className={`inline-flex items-center font-medium text-[var(--success)] ${compact ? "gap-1 text-[10px]" : "gap-2 text-xs"}`}

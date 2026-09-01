@@ -1,4 +1,8 @@
 .env
+.env.*
+!.env.example
+*.tar.gz
+deploy/secrets/
 *.pyc
 __pycache__/
 .venv/

@@ -1,11 +1,13 @@
 import io
 import socket
+import time
 from contextlib import contextmanager
 from typing import Iterator
 
 import paramiko
 
 from app.models import AuthType
+from app.services.ssh_passwd import PasswdDialog, generate_login_password
 
 
 class SshConnectError(Exception):
@@ -117,3 +119,92 @@ def run_command(
     err = stderr.read().decode("utf-8", errors="replace")
     code = stdout.channel.recv_exit_status()
     return code, out, err
+
+
+class PasswordChangeError(SshConnectError):
+    """PAM/passwd dialog failed."""
+
+
+def change_expired_password_over_pty(
+    client: paramiko.SSHClient,
+    *,
+    current_password: str,
+    timeout: float = 35.0,
+) -> str:
+    """Drive the forced passwd dialog on a PTY. Returns the password that was accepted.
+
+    Tries to keep the current password first (often allowed on fresh VPS images).
+    If pam_pwhistory rejects reuse, sets a generated password.
+    After success the SSH session is usually dead — caller must reconnect.
+    """
+    transport = client.get_transport()
+    if transport is None or not transport.is_active():
+        raise PasswordChangeError("SSH-транспорт закрыт, нельзя сменить пароль")
+
+    dialog = PasswdDialog(
+        current_password=current_password,
+        generated_password=generate_login_password(),
+    )
+    chan = transport.open_session()
+    chan.settimeout(1.0)
+    try:
+        chan.get_pty(term="xterm", width=120, height=32)
+        chan.invoke_shell()
+    except Exception as exc:  # noqa: BLE001
+        try:
+            chan.close()
+        except Exception:  # noqa: BLE001
+            pass
+        raise PasswordChangeError(f"Не удалось открыть TTY для смены пароля: {exc}") from exc
+
+    buf = ""
+    deadline = time.monotonic() + timeout
+    poked = False
+    try:
+        while time.monotonic() < deadline:
+            chunk = ""
+            try:
+                if chan.recv_ready():
+                    chunk += chan.recv(4096).decode("utf-8", errors="replace")
+                if chan.recv_stderr_ready():
+                    chunk += chan.recv_stderr(4096).decode("utf-8", errors="replace")
+            except socket.timeout:
+                pass
+
+            if chunk:
+                buf += chunk
+                to_send, buf = dialog.consume(buf)
+                if to_send is not None:
+                    chan.send(to_send + "\n")
+                if dialog.success:
+                    time.sleep(0.2)
+                    return dialog.new_password
+                if dialog.failed:
+                    raise PasswordChangeError(dialog.failed)
+
+            if chan.exit_status_ready() and not chan.recv_ready() and not chan.recv_stderr_ready():
+                if dialog.success or dialog.new_sends >= 2:
+                    return dialog.new_password
+                leftover = buf.strip().replace("\r", "")
+                detail = leftover.splitlines()[-1] if leftover else "сессия закрылась"
+                raise PasswordChangeError(f"Сессия закрылась до смены пароля: {detail[:240]}")
+
+            if not chunk:
+                if (
+                    not poked
+                    and not dialog.sent_current
+                    and time.monotonic() > deadline - timeout + 4.0
+                ):
+                    chan.send("\n")
+                    poked = True
+                time.sleep(0.05)
+
+        raise PasswordChangeError(
+            "Таймаут смены пароля: сервер не дал приглашение passwd. "
+            "Зайдите вручную: ssh -t user@host"
+        )
+    finally:
+        try:
+            chan.close()
+        except Exception:  # noqa: BLE001
+            pass

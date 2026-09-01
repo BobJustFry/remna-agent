@@ -34,11 +34,13 @@ from app.schemas import (
     NodeRebootOut,
     NodeSecretOut,
     NodesAgentResponse,
+    NodesMetricsResponse,
     NodesOnlineResponse,
     NodeUpdate,
     RemnaScriptRunRequest,
     SshCheckOut,
     VpsCapacityOut,
+    ProbeStubInstallRequest,
     WarpInstallRequest,
 )
 from app.services.agent_install import (
@@ -48,12 +50,14 @@ from app.services.agent_install import (
     install_agent_via_ssh,
 )
 from app.services.agent_metrics import (
+    AgentStatus,
     clear_agent_status_cache,
     fetch_agent_status,
     is_token_mismatch,
 )
 from app.services.agent_token_sync import TokenSyncError, repair_agent_auth_via_ssh
 from app.services.crypto import decrypt_secret, encrypt_secret
+from app.services.metrics_store import MetricRange, fetch_series
 from app.services.ping import check_many
 from app.services.node_reboot import NodeRebootError, reboot_node_via_ssh
 from app.services.remnanode_script import (
@@ -73,6 +77,7 @@ from app.services.haproxy_script import (
 )
 from app.services.haproxy_stats import fetch_haproxy_stats
 from app.services.vps_capacity import fetch_vps_capacity
+from app.services.probe_stub_script import ProbeStubScriptError, run_probe_stub_via_ssh
 from app.services.warp_script import WarpScriptError, run_warp_script_via_ssh
 from app.services.ssh_keys import normalize_private_key
 from app.services.dest_pick import DestPickError, run_dest_loopback, run_dest_scan
@@ -164,9 +169,109 @@ async def nodes_online(
     return NodesOnlineResponse(statuses=statuses)
 
 
+@router.get("/metrics", response_model=NodesMetricsResponse)
+async def nodes_metrics(
+    range_key: MetricRange = Query(default="day", alias="range"),
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> NodesMetricsResponse:
+    step, series = await fetch_series(db, range_key=range_key)
+    return NodesMetricsResponse(range=range_key, step_sec=step, series=series)
+
+
 # Avoid hammering SSH when token stays broken (seconds).
 _TOKEN_SYNC_COOLDOWN_SEC = 60.0
 _token_sync_last_try: dict[str, float] = {}
+
+
+def _status_to_schema(st: AgentStatus) -> AgentNodeStatus:
+    return AgentNodeStatus(
+        present=st.present,
+        configured=st.configured,
+        version=st.version,
+        remnanode_version=st.remnanode_version,
+        remnanode_running=st.remnanode_running,
+        warp_present=st.warp_present,
+        warp_up=st.warp_up,
+        warp_healthy=st.warp_healthy,
+        warp_handshake_sec=st.warp_handshake_sec,
+        warp_egress_ok=st.warp_egress_ok,
+        warp_interface=st.warp_interface,
+        warp_method=st.warp_method,
+        warp_version=st.warp_version,
+        warp_ipv4=st.warp_ipv4,
+        haproxy_present=st.haproxy_present,
+        haproxy_up=st.haproxy_up,
+        haproxy_version=st.haproxy_version,
+        haproxy_listen=st.haproxy_listen,
+        proxy_peers=st.proxy_peers,
+        proxy_conns=st.proxy_conns,
+        cpu_percent=st.cpu_percent,
+        mem_percent=st.mem_percent,
+        disk_percent=st.disk_percent,
+        loadavg=st.loadavg,
+        error=st.error,
+    )
+
+
+async def _probe_one_node(node: Node) -> tuple[str, AgentNodeStatus]:
+    node_id = str(node.id)
+    token = decrypt_secret(node.agent_token_enc) if node.agent_token_enc else None
+    st = await fetch_agent_status(
+        host=node.host,
+        token=token,
+        agent_port=node.agent_port,
+        node_id=node_id,
+    )
+
+    if is_token_mismatch(st):
+        now = asyncio.get_running_loop().time()
+        last = _token_sync_last_try.get(node_id, 0.0)
+        if now - last >= _TOKEN_SYNC_COOLDOWN_SEC:
+            _token_sync_last_try[node_id] = now
+            password = decrypt_secret(node.password_enc) if node.password_enc else None
+            private_key = (
+                decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+            )
+            try:
+                remote_token = await asyncio.to_thread(
+                    repair_agent_auth_via_ssh,
+                    host=node.host,
+                    ssh_port=node.ssh_port,
+                    username=node.ssh_user,
+                    auth_type=node.auth_type,
+                    password=password,
+                    private_key=private_key,
+                    agent_port=node.agent_port or AGENT_PORT_DEFAULT,
+                )
+                # Own session — gather() must not commit the shared request session.
+                async with SessionLocal() as sync_db:
+                    row = await sync_db.get(Node, node.id)
+                    if row:
+                        row.agent_token_enc = encrypt_secret(remote_token)
+                        await sync_db.commit()
+                clear_agent_status_cache(node_id)
+                st = await fetch_agent_status(
+                    host=node.host,
+                    token=remote_token,
+                    agent_port=node.agent_port,
+                    node_id=node_id,
+                )
+                if is_token_mismatch(st):
+                    st.error = (
+                        "Токен с VPS прочитан и агент перезапущен, но /metrics "
+                        "всё ещё отклоняет запрос — переустановите агент"
+                    )
+            except TokenSyncError as exc:
+                st.error = (
+                    f"Токен не совпадает; автосинхронизация по SSH не удалась: {exc.message}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.error = (
+                    f"Токен не совпадает; автосинхронизация по SSH не удалась: {exc}"
+                )
+
+    return node_id, _status_to_schema(st)
 
 
 @router.get("/agents", response_model=NodesAgentResponse)
@@ -176,91 +281,7 @@ async def nodes_agents(
 ) -> NodesAgentResponse:
     result = await db.execute(select(Node))
     nodes = list(result.scalars().all())
-
-    async def one(node: Node) -> tuple[str, AgentNodeStatus]:
-        node_id = str(node.id)
-        token = decrypt_secret(node.agent_token_enc) if node.agent_token_enc else None
-        st = await fetch_agent_status(
-            host=node.host,
-            token=token,
-            agent_port=node.agent_port,
-            node_id=node_id,
-        )
-
-        if is_token_mismatch(st):
-            now = asyncio.get_running_loop().time()
-            last = _token_sync_last_try.get(node_id, 0.0)
-            if now - last >= _TOKEN_SYNC_COOLDOWN_SEC:
-                _token_sync_last_try[node_id] = now
-                password = decrypt_secret(node.password_enc) if node.password_enc else None
-                private_key = (
-                    decrypt_secret(node.private_key_enc) if node.private_key_enc else None
-                )
-                try:
-                    remote_token = await asyncio.to_thread(
-                        repair_agent_auth_via_ssh,
-                        host=node.host,
-                        ssh_port=node.ssh_port,
-                        username=node.ssh_user,
-                        auth_type=node.auth_type,
-                        password=password,
-                        private_key=private_key,
-                        agent_port=node.agent_port or AGENT_PORT_DEFAULT,
-                    )
-                    # Own session — gather() must not commit the shared request session.
-                    async with SessionLocal() as sync_db:
-                        row = await sync_db.get(Node, node.id)
-                        if row:
-                            row.agent_token_enc = encrypt_secret(remote_token)
-                            await sync_db.commit()
-                    clear_agent_status_cache(node_id)
-                    st = await fetch_agent_status(
-                        host=node.host,
-                        token=remote_token,
-                        agent_port=node.agent_port,
-                        node_id=node_id,
-                    )
-                    if is_token_mismatch(st):
-                        st.error = (
-                            "Токен с VPS прочитан и агент перезапущен, но /metrics "
-                            "всё ещё отклоняет запрос — переустановите агент"
-                        )
-                except TokenSyncError as exc:
-                    st.error = (
-                        f"Токен не совпадает; автосинхронизация по SSH не удалась: {exc.message}"
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    st.error = (
-                        f"Токен не совпадает; автосинхронизация по SSH не удалась: {exc}"
-                    )
-
-        return node_id, AgentNodeStatus(
-            present=st.present,
-            configured=st.configured,
-            version=st.version,
-            remnanode_version=st.remnanode_version,
-            remnanode_running=st.remnanode_running,
-            warp_present=st.warp_present,
-            warp_up=st.warp_up,
-            warp_healthy=st.warp_healthy,
-            warp_handshake_sec=st.warp_handshake_sec,
-            warp_egress_ok=st.warp_egress_ok,
-            warp_interface=st.warp_interface,
-            warp_method=st.warp_method,
-            warp_version=st.warp_version,
-            warp_ipv4=st.warp_ipv4,
-            haproxy_present=st.haproxy_present,
-            haproxy_up=st.haproxy_up,
-            haproxy_version=st.haproxy_version,
-            haproxy_listen=st.haproxy_listen,
-            cpu_percent=st.cpu_percent,
-            mem_percent=st.mem_percent,
-            disk_percent=st.disk_percent,
-            loadavg=st.loadavg,
-            error=st.error,
-        )
-
-    pairs = await asyncio.gather(*(one(n) for n in nodes))
+    pairs = await asyncio.gather(*(_probe_one_node(n) for n in nodes))
     from app.services.agent_version import get_bundled_agent_version
     from app.services.wgcf_releases import get_latest_wgcf_version
 
@@ -268,6 +289,64 @@ async def nodes_agents(
         statuses=dict(pairs),
         latest_agent_version=get_bundled_agent_version(),
         latest_wgcf_version=await get_latest_wgcf_version(),
+    )
+
+
+@router.get("/agents/stream")
+async def nodes_agents_stream(
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """Same probes as GET /agents, but emit each node as soon as it answers."""
+    result = await db.execute(select(Node))
+    nodes = list(result.scalars().all())
+    for node in nodes:
+        db.expunge(node)
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        tasks = [asyncio.create_task(_probe_one_node(n)) for n in nodes]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                node_id, st = await fut
+                yield (
+                    json.dumps(
+                        {
+                            "type": "node",
+                            "id": node_id,
+                            "status": st.model_dump(mode="json"),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            from app.services.agent_version import get_bundled_agent_version
+            from app.services.wgcf_releases import get_latest_wgcf_version
+
+            yield (
+                json.dumps(
+                    {
+                        "type": "done",
+                        "latest_agent_version": get_bundled_agent_version(),
+                        "latest_wgcf_version": await get_latest_wgcf_version(),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+        except asyncio.CancelledError:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -307,6 +386,18 @@ async def get_node(
     db: AsyncSession = Depends(get_db),
 ) -> NodeOut:
     return _to_out(await _get_node(db, node_id))
+
+
+@router.get("/{node_id}/metrics", response_model=NodesMetricsResponse)
+async def node_metrics(
+    node_id: uuid.UUID,
+    range_key: MetricRange = Query(default="day", alias="range"),
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> NodesMetricsResponse:
+    await _get_node(db, node_id)
+    step, series = await fetch_series(db, range_key=range_key, node_id=node_id)
+    return NodesMetricsResponse(range=range_key, step_sec=step, series=series)
 
 
 @router.patch("/{node_id}", response_model=NodeOut)
@@ -463,6 +554,7 @@ async def _persist_agent_credentials(
     token: str,
     agent_port: int,
     ssh_user: str | None = None,
+    ssh_password: str | None = None,
 ) -> NodeOut:
     """Own session — request-scoped db may be closed during StreamingResponse."""
     async with SessionLocal() as session:
@@ -473,8 +565,21 @@ async def _persist_agent_credentials(
         node.agent_port = agent_port
         if ssh_user and ssh_user != node.ssh_user:
             node.ssh_user = ssh_user
+        if ssh_password:
+            node.password_enc = encrypt_secret(ssh_password)
+            node.auth_type = AuthType.password.value
         await session.commit()
         return _to_out(await _get_node(session, node_id))
+
+
+async def _persist_ssh_password(node_id: uuid.UUID, password: str) -> None:
+    async with SessionLocal() as session:
+        node = await session.get(Node, node_id)
+        if not node:
+            return
+        node.password_enc = encrypt_secret(password)
+        node.auth_type = AuthType.password.value
+        await session.commit()
 
 
 @router.post("/{node_id}/agent/install")
@@ -509,6 +614,7 @@ async def install_node_agent(
         def worker() -> None:
             try:
                 resolved: list[str] = []
+                resolved_password: list[str] = []
                 for line in install_agent_via_ssh(
                     host=host,
                     ssh_port=ssh_port,
@@ -520,6 +626,7 @@ async def install_node_agent(
                     agent_port=agent_port,
                     install_deps=install_deps,
                     resolved_username=resolved,
+                    resolved_password=resolved_password,
                     cancel=cancel,
                 ):
                     if cancel.is_set():
@@ -535,6 +642,7 @@ async def install_node_agent(
                             token=token,
                             agent_port=agent_port,
                             ssh_user=resolved[0] if resolved else None,
+                            ssh_password=resolved_password[0] if resolved_password else None,
                         ),
                         loop,
                     )
@@ -658,6 +766,7 @@ async def run_node_script(
         tune_ports=body.tune_ports,
         tune_ipv6=body.tune_ipv6,
         skip_system_update=body.skip_system_update,
+        cf_204_stub=body.cf_204_stub,
     )
 
     async def event_stream() -> AsyncIterator[bytes]:
@@ -666,20 +775,74 @@ async def run_node_script(
         cancel = threading.Event()
 
         def worker() -> None:
+            ssh_password = password
             try:
+                resolved_password: list[str] = []
                 for line in run_remnanode_script_via_ssh(
                     host=host,
                     ssh_port=ssh_port,
                     username=username,
                     auth_type=auth_type,
-                    password=password,
+                    password=ssh_password,
                     private_key=private_key,
                     params=params,
                     cancel=cancel,
+                    resolved_password=resolved_password,
                 ):
                     if cancel.is_set():
                         raise AgentInstallCancelled()
                     loop.call_soon_threadsafe(queue.put_nowait, {"type": "log", "line": line})
+                if cancel.is_set():
+                    raise AgentInstallCancelled()
+                if resolved_password:
+                    try:
+                        fut = asyncio.run_coroutine_threadsafe(
+                            _persist_ssh_password(node_id, resolved_password[0]),
+                            loop,
+                        )
+                        fut.result(timeout=30)
+                    except Exception as exc:  # noqa: BLE001
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait,
+                            {
+                                "type": "log",
+                                "line": f"✗ Не удалось сохранить новый SSH-пароль в панели: {exc}",
+                            },
+                        )
+                    else:
+                        ssh_password = resolved_password[0]
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait,
+                            {
+                                "type": "log",
+                                "line": "✓ Новый SSH-пароль сохранён в панели",
+                            },
+                        )
+                if body.action in ("install", "reinstall") and body.cf_204_stub:
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait,
+                        {"type": "log", "line": ""},
+                    )
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait,
+                        {"type": "log", "line": "── Заглушка cf_204 ──"},
+                    )
+                    for line in run_probe_stub_via_ssh(
+                        host=host,
+                        ssh_port=ssh_port,
+                        username=username,
+                        auth_type=auth_type,
+                        password=ssh_password,
+                        private_key=private_key,
+                        node_name=node.name,
+                        patch_profile=True,
+                        cancel=cancel,
+                    ):
+                        if cancel.is_set():
+                            raise AgentInstallCancelled()
+                        loop.call_soon_threadsafe(
+                            queue.put_nowait, {"type": "log", "line": line}
+                        )
                 if cancel.is_set():
                     raise AgentInstallCancelled()
                 loop.call_soon_threadsafe(
@@ -805,6 +968,102 @@ async def install_node_warp(
                 loop.call_soon_threadsafe(
                     queue.put_nowait,
                     {"type": "error", "message": str(exc) or "Ошибка установки WARP"},
+                )
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        task = asyncio.create_task(asyncio.to_thread(worker))
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8")
+        except (asyncio.CancelledError, GeneratorExit):
+            cancel.set()
+            raise
+        finally:
+            cancel.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=8)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/{node_id}/probe-stub/install")
+async def install_node_probe_stub(
+    node_id: uuid.UUID,
+    body: ProbeStubInstallRequest,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """NDJSON stream: vpn-probe-stub + routing в профиле Remnawave."""
+    node = await db.get(Node, node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Нода не найдена")
+
+    password = decrypt_secret(node.password_enc) if node.password_enc else None
+    private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+    host = node.host
+    ssh_port = node.ssh_port
+    username = node.ssh_user
+    auth_type = node.auth_type
+    patch_profile = body.patch_profile
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        cancel = threading.Event()
+
+        def worker() -> None:
+            try:
+                for line in run_probe_stub_via_ssh(
+                    host=host,
+                    ssh_port=ssh_port,
+                    username=username,
+                    auth_type=auth_type,
+                    password=password,
+                    private_key=private_key,
+                    node_name=node.name,
+                    patch_profile=patch_profile,
+                    cancel=cancel,
+                ):
+                    if cancel.is_set():
+                        raise AgentInstallCancelled()
+                    loop.call_soon_threadsafe(queue.put_nowait, {"type": "log", "line": line})
+                if cancel.is_set():
+                    raise AgentInstallCancelled()
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {
+                        "type": "done",
+                        "ok": True,
+                        "message": f"Заглушка cf_204 установлена на {host}",
+                    },
+                )
+            except AgentInstallCancelled:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": AgentInstallCancelled.message},
+                )
+            except ProbeStubScriptError as exc:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": exc.message},
+                )
+            except Exception as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": str(exc) or "Ошибка установки заглушки"},
                 )
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, None)
@@ -1068,7 +1327,7 @@ async def run_node_haproxy(
     _: str = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
-    """NDJSON stream: install / apply / reload / start / stop HAProxy."""
+    """NDJSON stream: install / apply / reload / start / stop / uninstall HAProxy."""
     node = await db.get(Node, node_id)
     if not node:
         raise HTTPException(status_code=404, detail="Нода не найдена")
@@ -1104,6 +1363,7 @@ async def run_node_haproxy(
         "reload": f"HAProxy reload на {host}",
         "start": f"HAProxy запущен на {host}",
         "stop": f"HAProxy остановлен на {host}",
+        "uninstall": f"HAProxy удалён с {host}",
     }.get(body.action, f"HAProxy: {body.action} на {host}")
 
     async def event_stream() -> AsyncIterator[bytes]:
