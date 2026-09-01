@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "0.1.13"
+VERSION = "0.1.14"
 STARTED_AT = time.time()
 _LAST_CPU = None
 _REMNA_VER_CACHE: tuple[float, bool, str | None] | None = None
@@ -34,6 +34,10 @@ _WARP_IFACES = ("warp", "CloudflareWARP", "WARP")
 _WARP_TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 _egress_lock = threading.Lock()
 _egress_state: dict = {"ok": None, "at": 0.0, "busy": False, "iface": None}
+_CF204_URL = "http://cp.cloudflare.com/generate_204"
+_CF204_INTERVAL = 20.0
+_cf204_lock = threading.Lock()
+_cf204_state: dict = {"ok": None, "ms": None, "at": 0.0}
 
 
 def env(name: str, default: str | None = None) -> str | None:
@@ -761,6 +765,45 @@ def peers_info() -> dict:
     return data
 
 
+def _cf204_probe() -> tuple[bool, float | None]:
+    t0 = time.perf_counter()
+    try:
+        req = urllib.request.Request(_CF204_URL, method="GET")
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            code = int(resp.getcode() or 0)
+            ms = round((time.perf_counter() - t0) * 1000.0, 1)
+            return code in (200, 204), ms
+    except Exception:
+        return False, None
+
+
+def _cf204_loop() -> None:
+    while True:
+        ok, ms = _cf204_probe()
+        with _cf204_lock:
+            _cf204_state["ok"] = ok
+            _cf204_state["ms"] = ms
+            _cf204_state["at"] = time.time()
+        time.sleep(_CF204_INTERVAL)
+
+
+def cf204_info() -> dict:
+    with _cf204_lock:
+        return {
+            "cf204_ok": _cf204_state["ok"],
+            "cf204_ms": _cf204_state["ms"],
+        }
+
+
+def start_cf204_loop() -> None:
+    ok, ms = _cf204_probe()
+    with _cf204_lock:
+        _cf204_state["ok"] = ok
+        _cf204_state["ms"] = ms
+        _cf204_state["at"] = time.time()
+    threading.Thread(target=_cf204_loop, daemon=True, name="cf204").start()
+
+
 def collect_metrics() -> dict:
     mem_total, mem_used, mem_percent = mem_stats()
     disk_total, disk_used, disk_percent = disk_stats("/")
@@ -784,6 +827,7 @@ def collect_metrics() -> dict:
         **warp,
         **haproxy,
         **peers,
+        **cf204_info(),
     }
 
 
@@ -831,6 +875,7 @@ def main() -> None:
     if not token:
         raise SystemExit("REMNA_AGENT_TOKEN is required")
 
+    start_cf204_loop()
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.agent_token = token  # type: ignore[attr-defined]
     print(f"remna-node-agent {VERSION} on {host}:{port}", flush=True)

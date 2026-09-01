@@ -44,6 +44,8 @@ class AgentStatus:
     mem_percent: float | None = None
     disk_percent: float | None = None
     loadavg: list[float] | None = None
+    cf204_ok: bool | None = None
+    cf204_ms: float | None = None
     error: str | None = None
 
 
@@ -71,6 +73,13 @@ def is_token_mismatch(status: AgentStatus) -> bool:
     return status.configured and not status.present and (
         "токен" in err or "авторизац" in err or "401" in err
     )
+
+
+def peek_cached_status(node_id: str) -> AgentStatus | None:
+    entry = _cache.get(f"node:{node_id}")
+    if entry is None:
+        return None
+    return entry.last_ok
 
 
 def clear_agent_status_cache(node_id: str | None = None) -> None:
@@ -150,6 +159,13 @@ async def _probe_once(
                 return int(v)
             return None
 
+        def _as_float(v: object) -> float | None:
+            if isinstance(v, bool) or v is None:
+                return None
+            if isinstance(v, (int, float)):
+                return round(float(v), 1)
+            return None
+
         return AgentStatus(
             present=True,
             configured=True,
@@ -175,6 +191,8 @@ async def _probe_once(
             mem_percent=data.get("mem_percent"),
             disk_percent=data.get("disk_percent"),
             loadavg=data.get("loadavg"),
+            cf204_ok=_as_bool(data.get("cf204_ok")),
+            cf204_ms=_as_float(data.get("cf204_ms")),
             error=None,
         )
 

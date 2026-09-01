@@ -1,4 +1,4 @@
-"""Background loop: ping + agent CPU/disk into node_metric_samples."""
+"""Background loop: agent CPU/disk + cf_204 RTT into node_metric_samples."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from app.models import Node
 from app.services.agent_metrics import fetch_agent_status
 from app.services.crypto import decrypt_secret
 from app.services.metrics_store import insert_samples, prune_old
-from app.services.ping import check_many
 
 log = logging.getLogger("remna.metrics")
 
@@ -27,9 +26,6 @@ async def sample_once() -> int:
         nodes = list(result.scalars().all())
         if not nodes:
             return 0
-
-        ping_items = [(str(n.id), n.host, n.ssh_port) for n in nodes]
-        pings = await check_many(ping_items)
 
         async def one_agent(node: Node) -> tuple[str, object]:
             token = decrypt_secret(node.agent_token_enc) if node.agent_token_enc else None
@@ -53,17 +49,18 @@ async def sample_once() -> int:
         rows = []
         for node in nodes:
             nid = str(node.id)
-            ping = pings.get(nid)
             ag = agents.get(nid)
             cpu = getattr(ag, "cpu_percent", None) if ag is not None else None
             mem = getattr(ag, "mem_percent", None) if ag is not None else None
             disk = getattr(ag, "disk_percent", None) if ag is not None else None
             present = bool(getattr(ag, "present", False)) if ag is not None else False
+            cf_ok = getattr(ag, "cf204_ok", None) if ag is not None else None
+            cf_ms = getattr(ag, "cf204_ms", None) if ag is not None else None
             rows.append(
                 {
                     "node_id": uuid.UUID(nid),
-                    "online": bool(ping and ping.online),
-                    "ping_ms": ping.latency_ms if ping and ping.online else None,
+                    "online": bool(cf_ok),
+                    "ping_ms": cf_ms if cf_ok else None,
                     "cpu_percent": cpu if present else None,
                     "mem_percent": mem if present else None,
                     "disk_percent": disk if present else None,

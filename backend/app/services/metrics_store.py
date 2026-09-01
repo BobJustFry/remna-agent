@@ -70,6 +70,12 @@ async def prune_old(db: AsyncSession) -> int:
     return int(result.rowcount or 0)
 
 
+async def clear_all_samples(db: AsyncSession) -> int:
+    result = await db.execute(delete(NodeMetricSample))
+    await db.commit()
+    return int(result.rowcount or 0)
+
+
 async def fetch_series(
     db: AsyncSession,
     *,

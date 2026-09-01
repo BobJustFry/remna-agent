@@ -5,6 +5,7 @@
 - `GET /health` — без авторизации
 - `GET /metrics` — `Authorization: Bearer <token>`
   - CPU/RAM/disk, RemnaNode version, **WARP** (`warp_present` / `warp_up` / `warp_healthy` / handshake / iface)
+  - **cf204_ok** / **cf204_ms** — HTTP `GET http://cp.cloudflare.com/generate_204` с ноды (фон, ~20 с)
   - **proxy_peers** / **proxy_conns** — unique remote IPs and established TCP on public listen ports of `rw-core` / `xray` / `haproxy` (loopback steal/origin skipped). Two `ss` calls, cached ~8s. Absent on older agents.
 
 Переменные: `REMNA_AGENT_TOKEN`, `REMNA_AGENT_PORT` (по умолчанию `7422`).

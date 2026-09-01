@@ -121,6 +121,8 @@ class AgentNodeStatus(BaseModel):
     mem_percent: float | None = None
     disk_percent: float | None = None
     loadavg: list[float] | None = None
+    cf204_ok: bool | None = None
+    cf204_ms: float | None = None
     error: str | None = None
 
 

@@ -130,6 +130,8 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
+  resetMetrics: () =>
+    request<{ deleted: number }>("/api/settings/reset-metrics", { method: "POST" }),
   runScriptStream: (
     id: string,
     body: RemnaScriptRunBody,

@@ -56,6 +56,8 @@ export type AgentStatus = {
   mem_percent: number | null;
   disk_percent: number | null;
   loadavg: number[] | null;
+  cf204_ok: boolean | null;
+  cf204_ms: number | null;
   error: string | null;
 };
 

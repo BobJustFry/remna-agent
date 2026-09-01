@@ -8,6 +8,7 @@ from app.deps import require_user
 from app.models import AppSetting
 from app.schemas import AppSettingsOut, AppSettingsUpdate, RemnaScriptDefaults
 from app.services.crypto import decrypt_secret, encrypt_secret
+from app.services.metrics_store import clear_all_samples
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -79,3 +80,12 @@ async def update_settings(
 
     await db.commit()
     return await _read_settings(db)
+
+
+@router.post("/reset-metrics")
+async def reset_metrics(
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, int]:
+    deleted = await clear_all_samples(db)
+    return {"deleted": deleted}

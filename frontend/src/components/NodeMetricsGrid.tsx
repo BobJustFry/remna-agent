@@ -97,7 +97,7 @@ function NodeTile({
   agent: AgentMap[string] | undefined;
   onOpen: () => void;
 }) {
-  const pingLive = status?.online ? status.latency_ms : null;
+  const pingLive = agent?.cf204_ok ? agent.cf204_ms : null;
   const cpuLive = agent?.present ? agent.cpu_percent : null;
   const diskLive = agent?.present ? agent.disk_percent : null;
   const times = points.map((p) => p.t);
@@ -121,7 +121,7 @@ function NodeTile({
       </button>
       <div className="mt-0.5 grid min-h-0 flex-1 grid-rows-3 gap-0.5">
         <SparkRow
-          label="пинг"
+          label="cf_204"
           value={fmtMs(pingLive)}
           color={PING}
           times={times}
@@ -308,7 +308,7 @@ function NodeMetricModal({
 
         <div className="overflow-auto px-4 py-3">
           <dl className="mb-3 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] sm:grid-cols-4 lg:grid-cols-8">
-            <Fact label="пинг" value={fmtMs(status?.online ? status.latency_ms : null)} />
+            <Fact label="cf_204" value={fmtMs(agent?.cf204_ok ? agent.cf204_ms : null)} />
             <Fact label="CPU" value={fmtPct(agent?.present ? agent.cpu_percent : null)} />
             <Fact label="RAM" value={fmtPct(agent?.present ? agent.mem_percent : null)} />
             <Fact label="диск" value={fmtPct(agent?.present ? agent.disk_percent : null)} />
@@ -340,7 +340,7 @@ function NodeMetricModal({
           {loading && <p className="mb-2 text-xs text-[var(--muted)]">Загрузка периода…</p>}
 
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-            <ChartBlock title="Пинг" unit="мс">
+            <ChartBlock title="cf_204" unit="мс">
               <NodeMetricLineChart
                 {...chart}
                 values={points.map((p) => p.ping_ms)}

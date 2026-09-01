@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useOutletContext } from "react-router-dom";
 import { api } from "../api/client";
 import type { AppOutletContext } from "../components/AppShell";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { getQueueConcurrency, QUEUE_CONCURRENCY_BOUNDS, setQueueConcurrency } from "../lib/concurrency";
 
 export function SettingsPage() {
@@ -12,6 +13,8 @@ export function SettingsPage() {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
 
   useEffect(() => {
     void api
@@ -121,6 +124,23 @@ export function SettingsPage() {
               </button>
             </section>
 
+            <section className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] p-4">
+              <h2 className="text-sm font-semibold">Данные графиков</h2>
+              <p className="mt-1 text-xs text-[var(--muted)]">
+                Стирает накопленную историю cf_204 / CPU / RAM / диск по всем нодам. Ноды, SSH и
+                настройки не трогает. После сброса графики начнут писаться заново (cf_204 — с агента
+                0.1.14+).
+              </p>
+              <button
+                type="button"
+                disabled={busy || resetBusy}
+                onClick={() => setResetOpen(true)}
+                className="mt-3 rounded-lg border border-[rgba(240,113,120,0.45)] px-3 py-1.5 text-sm font-semibold text-[var(--danger)] hover:bg-[rgba(240,113,120,0.12)] disabled:opacity-50"
+              >
+                Сбросить накопленные данные
+              </button>
+            </section>
+
             <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
@@ -135,6 +155,33 @@ export function SettingsPage() {
           </div>
         )}
       </div>
+      <ConfirmDialog
+        open={resetOpen}
+        title="Сбросить графики?"
+        message="Будут удалены все накопленные точки cf_204, CPU, RAM и диска. Это нельзя отменить. Ноды и учётные данные останутся."
+        confirmLabel="Сбросить"
+        busy={resetBusy}
+        busyLabel="Сброс…"
+        zClass="z-[80]"
+        onCancel={() => {
+          if (!resetBusy) setResetOpen(false);
+        }}
+        onConfirm={() => {
+          void (async () => {
+            setResetBusy(true);
+            setMsg(null);
+            try {
+              const r = await api.resetMetrics();
+              setMsg(`Удалено точек: ${r.deleted}`);
+              setResetOpen(false);
+            } catch (err) {
+              setMsg(err instanceof Error ? err.message : "Не удалось сбросить данные");
+            } finally {
+              setResetBusy(false);
+            }
+          })();
+        }}
+      />
     </div>
   );
 }

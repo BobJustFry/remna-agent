@@ -54,6 +54,7 @@ from app.services.agent_metrics import (
     clear_agent_status_cache,
     fetch_agent_status,
     is_token_mismatch,
+    peek_cached_status,
 )
 from app.services.agent_token_sync import TokenSyncError, repair_agent_auth_via_ssh
 from app.services.crypto import decrypt_secret, encrypt_secret
@@ -158,14 +159,15 @@ async def nodes_online(
     rows = result.all()
     items = [(str(row.id), row.host, row.ssh_port) for row in rows]
     checked = await check_many(items)
-    statuses = {
-        node_id: NodeOnlineStatus(
+    statuses = {}
+    for node_id, item in checked.items():
+        cached = peek_cached_status(node_id)
+        cf_ms = cached.cf204_ms if cached and cached.cf204_ok else None
+        statuses[node_id] = NodeOnlineStatus(
             online=item.online,
-            latency_ms=item.latency_ms,
-            method=item.method,
+            latency_ms=cf_ms,
+            method="cf204" if cf_ms is not None else item.method,
         )
-        for node_id, item in checked.items()
-    }
     return NodesOnlineResponse(statuses=statuses)
 
 
@@ -210,6 +212,8 @@ def _status_to_schema(st: AgentStatus) -> AgentNodeStatus:
         mem_percent=st.mem_percent,
         disk_percent=st.disk_percent,
         loadavg=st.loadavg,
+        cf204_ok=st.cf204_ok,
+        cf204_ms=st.cf204_ms,
         error=st.error,
     )
 

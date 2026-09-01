@@ -23,7 +23,7 @@ export const OnlineBadge = memo(function OnlineBadge({ status, compact }: Props)
     const via = status.method ? ` · ${status.method}` : "";
     const title =
       status.latency_ms != null
-        ? `Online · ${status.latency_ms} ms${via}`
+        ? `Online · cf_204 ${status.latency_ms} ms${via}`
         : `Online${via}`;
     return (
       <span
