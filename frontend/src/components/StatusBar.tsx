@@ -32,7 +32,7 @@ export function StatusBar({
   }
 
   return (
-    <footer className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t border-[var(--border)] bg-[var(--sidebar)] px-3 py-2 text-xs text-[var(--muted)] sm:px-4">
+    <footer className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t border-[var(--border)] bg-[var(--sidebar)] px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom,0px))] text-xs text-[var(--muted)] sm:px-4">
       <span>
         Нод: <span className="text-[var(--text)]">{nodes.length}</span>
       </span>

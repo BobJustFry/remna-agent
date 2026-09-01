@@ -40,10 +40,10 @@ export function SettingsPage() {
   }
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="border-b border-[var(--border)] px-4 py-4 sm:px-6">
-        <h1 className="text-xl font-semibold tracking-tight">Настройки</h1>
-        <p className="mt-0.5 text-sm text-[var(--muted)]">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <header className="border-b border-[var(--border)] px-4 py-3 sm:px-6 sm:py-4">
+        <h1 className="hidden text-xl font-semibold tracking-tight lg:block">Настройки</h1>
+        <p className="text-sm text-[var(--muted)] lg:mt-0.5">
           Общие параметры панели: SECRET_KEY Remnawave и параллелизм задач.
         </p>
       </header>

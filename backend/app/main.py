@@ -7,9 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from app.api import auth, hostings, nodes, remnawave, settings as settings_api
+from app.api import auth, hostings, nodes, remnawave, settings as settings_api, sharing
 from app.config import assert_secure_settings, settings
 from app.services.metrics_sampler import run_metrics_sampler
+from app.services.sharing_scanner import run_sharing_scanner
 
 logging.basicConfig(level=logging.INFO)
 
@@ -17,15 +18,17 @@ logging.basicConfig(level=logging.INFO)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     assert_secure_settings()
-    task = asyncio.create_task(run_metrics_sampler(), name="metrics-sampler")
+    metrics = asyncio.create_task(run_metrics_sampler(), name="metrics-sampler")
+    sharing_task = asyncio.create_task(run_sharing_scanner(), name="sharing-scanner")
     try:
         yield
     finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        for task in (metrics, sharing_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 # https://fastapi.tiangolo.com/how-to/conditional-openapi/
@@ -57,6 +60,7 @@ app.include_router(hostings.router, prefix="/api")
 app.include_router(nodes.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 app.include_router(remnawave.router, prefix="/api")
+app.include_router(sharing.router, prefix="/api")
 
 
 @app.get("/api/health")

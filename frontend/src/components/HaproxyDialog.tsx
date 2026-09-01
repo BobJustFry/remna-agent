@@ -278,13 +278,13 @@ export function HaproxyDialog({ node, onClose, onBusyChange }: Props) {
       storageKey="haproxy"
       defaultWidth={1120}
       defaultHeight={860}
-      minWidth={720}
+      minWidth={480}
       minHeight={520}
     >
-        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--border)] px-5 py-4">
-          <div>
+        <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b border-[var(--border)] px-4 py-3 sm:px-5 sm:py-4">
+          <div className="min-w-0">
             <h2 className="text-base font-semibold">HAProxy</h2>
-            <p className="mt-1 font-mono text-xs text-[var(--muted)]">
+            <p className="mt-1 truncate font-mono text-xs text-[var(--muted)]">
               {node.name} · {node.host}
             </p>
           </div>
@@ -307,7 +307,7 @@ export function HaproxyDialog({ node, onClose, onBusyChange }: Props) {
           </div>
         </div>
 
-        <div className="flex shrink-0 gap-1 border-b border-[var(--border)] px-5">
+        <div className="no-scrollbar flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--border)] px-4 sm:px-5">
           {(
             [
               ["config", "Конфиг"],
@@ -334,7 +334,7 @@ export function HaproxyDialog({ node, onClose, onBusyChange }: Props) {
           ))}
         </div>
 
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4 text-sm">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4 text-sm sm:px-5">
           <div className="grid gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-xs sm:grid-cols-4">
             <Stat
               label="пакет"

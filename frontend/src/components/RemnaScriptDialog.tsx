@@ -103,7 +103,7 @@ export function RemnaScriptDialog({ nodes, action, onClose, onConfirm }: Props) 
       minWidth={480}
       minHeight={420}
     >
-        <div className="shrink-0 border-b border-[var(--border)] px-5 py-4">
+        <div className="shrink-0 border-b border-[var(--border)] px-4 py-4 sm:px-5">
           <h2 className="text-base font-semibold">{title}</h2>
           {!bulk && (
             <p className="mt-1 font-mono text-xs text-[var(--muted)]">
@@ -112,7 +112,7 @@ export function RemnaScriptDialog({ nodes, action, onClose, onConfirm }: Props) 
           )}
         </div>
 
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4 text-sm">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4 text-sm sm:px-5">
           {bulk && (
             <div className="max-h-28 overflow-auto rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-xs">
               {nodes.map((n) => (

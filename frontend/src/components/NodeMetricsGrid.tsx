@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api } from "../api/client";
-import type { AgentMap, MetricPoint, MetricsRange, NodeItem, OnlineMap } from "../types";
+import type { AgentMap, MetricPoint, MetricsRange, NodeItem, OnlineMap, SharingUserHit } from "../types";
 import { CountryFlag } from "./CountryFlag";
 import { NodeMetricLineChart } from "./NodeMetricCharts";
 import { NodeMetricSpark } from "./NodeMetricSpark";
 import { pingToneClass } from "../lib/pingTone";
 import { OnlineBadge } from "./OnlineBadge";
+import { SharedBadge } from "./SharedBadge";
+import { useSharingStatus } from "../hooks/useSharingStatus";
 
 const PING = "#22d3bb";
 const CPU = "#e6a23c";
@@ -30,6 +32,7 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses }: Props) {
   const [fromTs, setFromTs] = useState(() => Date.now() / 1000 - 86400);
   const [toTs, setToTs] = useState(() => Date.now() / 1000);
   const [openId, setOpenId] = useState<string | null>(null);
+  const sharing = useSharingStatus();
 
   const load = useCallback(async () => {
     try {
@@ -52,7 +55,7 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses }: Props) {
 
   return (
     <>
-      <div className="grid h-[calc(100dvh-11rem)] grid-cols-2 content-start gap-1.5 overflow-auto sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-7 lg:h-[calc(100dvh-9.5rem)]">
+      <div className="grid h-full min-h-0 auto-rows-min content-start grid-cols-1 gap-1.5 overflow-auto min-[420px]:grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-7">
         {nodes.map((node) => (
           <NodeTile
             key={node.id}
@@ -62,6 +65,7 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses }: Props) {
             toTs={toTs}
             status={statuses[node.id]}
             agent={agentStatuses[node.id]}
+            sharingHits={sharing?.by_agent_id[node.id] ?? []}
             onOpen={() => setOpenId(node.id)}
           />
         ))}
@@ -88,6 +92,7 @@ function NodeTile({
   toTs,
   status,
   agent,
+  sharingHits,
   onOpen,
 }: {
   node: NodeItem;
@@ -96,9 +101,9 @@ function NodeTile({
   toTs: number;
   status: OnlineMap[string] | undefined;
   agent: AgentMap[string] | undefined;
+  sharingHits: SharingUserHit[];
   onOpen: () => void;
 }) {
-  const pingLive = agent?.cf204_ok ? agent.cf204_ms : null;
   const cpuLive = agent?.present ? agent.cpu_percent : null;
   const diskLive = agent?.present ? agent.disk_percent : null;
   const times = points.map((p) => p.t);
@@ -109,6 +114,7 @@ function NodeTile({
         <div className="min-w-0 flex-1 truncate text-[11px] font-semibold leading-tight text-[var(--text)]">
           {node.name}
         </div>
+        <SharedBadge nodeId={node.id} hits={sharingHits} compact />
         <OnlineBadge status={status} compact />
       </div>
       <button
@@ -122,14 +128,15 @@ function NodeTile({
       </button>
       <div className="mt-0.5 grid min-h-0 flex-1 grid-rows-3 gap-0.5">
         <SparkRow
-          label="cf_204"
-          value={fmtMs(pingLive)}
-          valueClass={pingToneClass(pingLive)}
+          label="вх. IP"
+          value={fmtCount(agent?.proxy_peers)}
+          valueClass={peersToneClass(agent?.proxy_peers)}
           color={PING}
           times={times}
           values={points.map((p) => p.ping_ms)}
           fromTs={fromTs}
           toTs={toTs}
+          title="Цифра — уникальные входящие IP. График — cf_204 за сутки."
         />
         <SparkRow
           label="CPU"
@@ -166,6 +173,7 @@ function SparkRow({
   fromTs,
   toTs,
   maxY,
+  title,
 }: {
   label: string;
   value: string;
@@ -176,9 +184,10 @@ function SparkRow({
   fromTs: number;
   toTs: number;
   maxY?: number;
+  title?: string;
 }) {
   return (
-    <div className="flex min-h-0 items-stretch gap-1">
+    <div className="flex min-h-0 items-stretch gap-1" title={title}>
       <div className="w-[52px] shrink-0 leading-tight">
         <div className="text-[9px] uppercase tracking-wide text-[var(--muted)]">{label}</div>
         <div
@@ -273,13 +282,13 @@ function NodeMetricModal({
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]"
+      className="fixed inset-0 z-[70] flex items-end justify-center bg-black/65 p-0 backdrop-blur-[2px] sm:items-center sm:p-4"
       onClick={onClose}
     >
       <div
         role="dialog"
         aria-modal="true"
-        className="flex w-full max-w-[880px] max-h-[min(90dvh,760px)] flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--bg-elevated)] shadow-2xl"
+        className="flex h-[min(96dvh,100%)] w-full max-w-[880px] flex-col overflow-hidden rounded-t-xl border border-[var(--border)] bg-[var(--bg-elevated)] shadow-2xl sm:h-auto sm:max-h-[min(90dvh,760px)] sm:rounded-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--border)] px-4 py-2.5">
@@ -315,6 +324,11 @@ function NodeMetricModal({
 
         <div className="overflow-auto px-4 py-3">
           <dl className="mb-3 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] sm:grid-cols-4 lg:grid-cols-8">
+            <Fact
+              label="вх. IP"
+              value={fmtCount(agent?.proxy_peers)}
+              valueClass={peersToneClass(agent?.proxy_peers)}
+            />
             <Fact
               label="cf_204"
               value={fmtMs(agent?.cf204_ok ? agent.cf204_ms : null)}
@@ -412,6 +426,18 @@ function Fact({ label, value, valueClass }: { label: string; value: string; valu
       <dd className={`truncate tabular-nums ${valueClass ?? "font-medium text-[var(--text)]"}`}>{value}</dd>
     </div>
   );
+}
+
+function fmtCount(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(v)) return "—";
+  return String(Math.round(v));
+}
+
+function peersToneClass(n: number | null | undefined): string {
+  const base = "font-bold tabular-nums";
+  if (n == null || !Number.isFinite(n)) return `${base} text-[var(--muted)]`;
+  if (n === 0) return `${base} text-[var(--muted)]`;
+  return `${base} text-[var(--accent)]`;
 }
 
 function fmtMs(v: number | null | undefined): string {

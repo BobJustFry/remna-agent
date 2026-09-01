@@ -107,3 +107,29 @@ export type SshCheckResult = {
   ok: boolean;
   message: string;
 };
+
+export type SharingUserHit = {
+  user_id: number;
+  username: string;
+  ips_5m: number;
+  ips_15m: number;
+  s16_5m: number;
+  ips_on_node: number;
+  reasons: string[];
+  rw_nodes: string[];
+};
+
+export type SharingStatus = {
+  scanned_at: string | null;
+  error: string | null;
+  scanning: boolean;
+  online_users: number;
+  flagged: number;
+  by_agent_id: Record<string, SharingUserHit[]>;
+  thresholds: Record<string, number>;
+};
+
+export type SharingDossier = {
+  filename: string;
+  text: string;
+};

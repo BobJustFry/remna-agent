@@ -18,6 +18,7 @@ import { DestPickDialog } from "../components/DestPickDialog";
 import { HaproxyDialog } from "../components/HaproxyDialog";
 import { NodeForm } from "../components/NodeForm";
 import { NodeRow, type NodeListDensity } from "../components/NodeRow";
+import { useSharingStatus } from "../hooks/useSharingStatus";
 import { remnanodeNeedsUpdate, warpNeedsInstall } from "../hooks/useRemnawaveVersions";
 import type { NodeFormValues, NodeItem } from "../types";
 
@@ -60,6 +61,7 @@ export function NodesPage() {
     latestAgentVersion,
     latestWgcfVersion,
   } = useOutletContext<AppOutletContext>();
+  const sharing = useSharingStatus();
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<NodeItem | null>(null);
@@ -100,8 +102,8 @@ export function NodesPage() {
 
   const compact = density === "compact";
   const headerGrid = compact
-    ? "lg:grid-cols-[28px_56px_minmax(100px,1fr)_minmax(100px,1fr)_48px_minmax(92px,auto)_minmax(48px,auto)_minmax(48px,auto)_minmax(110px,1fr)_minmax(64px,auto)_36px] lg:gap-2"
-    : "lg:grid-cols-[32px_120px_minmax(140px,1fr)_minmax(130px,1fr)_90px_minmax(110px,auto)_minmax(56px,auto)_minmax(56px,auto)_minmax(140px,1.1fr)_minmax(100px,auto)_44px] lg:gap-3";
+    ? "xl:grid-cols-[28px_56px_minmax(100px,1fr)_minmax(100px,1fr)_48px_minmax(92px,auto)_minmax(48px,auto)_minmax(48px,auto)_minmax(110px,1fr)_minmax(64px,auto)_36px] xl:gap-2"
+    : "xl:grid-cols-[32px_120px_minmax(140px,1fr)_minmax(130px,1fr)_90px_minmax(110px,auto)_minmax(56px,auto)_minmax(56px,auto)_minmax(140px,1.1fr)_minmax(100px,auto)_44px] xl:gap-3";
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -342,9 +344,9 @@ export function NodesPage() {
   }
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex flex-col gap-3 border-b border-[var(--border)] px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-        <div className="min-w-0">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <header className="flex flex-col gap-3 border-b border-[var(--border)] px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6 sm:py-4">
+        <div className="min-w-0 max-lg:hidden">
           <h1 className="text-xl font-semibold tracking-tight">Ноды</h1>
           <p className="mt-0.5 text-sm text-[var(--muted)]">
             Online — ping; ресурсы — агент на ноде (порт 7422).
@@ -357,7 +359,7 @@ export function NodesPage() {
             setFormError(null);
             setFormOpen(true);
           }}
-          className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#06221e] transition hover:brightness-110"
+          className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#06221e] transition hover:brightness-110 lg:ml-auto"
         >
           + Добавить
         </button>
@@ -368,7 +370,7 @@ export function NodesPage() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Поиск по имени, IP, хостингу…"
-          className="w-full max-w-md rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]"
+          className="w-full min-w-0 rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)] sm:max-w-md"
         />
         <button
           type="button"
@@ -494,7 +496,7 @@ export function NodesPage() {
           className={`flex-1 overflow-auto px-3 py-3 sm:px-6 sm:py-4 ${compact ? "space-y-1" : "space-y-2"}`}
         >
           {filtered.length > 0 && (
-            <label className="flex items-center gap-2 px-1 text-xs text-[var(--muted)] lg:hidden">
+            <label className="flex items-center gap-2 px-1 text-xs text-[var(--muted)] xl:hidden">
               <input
                 type="checkbox"
                 checked={allFilteredSelected}
@@ -505,7 +507,7 @@ export function NodesPage() {
             </label>
           )}
 
-          <div className="mb-2 space-y-2 lg:hidden">
+          <div className="mb-2 space-y-2 xl:hidden">
             <div className="flex flex-wrap gap-2">
               <SortFilterChip
                 label="Online"
@@ -576,7 +578,7 @@ export function NodesPage() {
           </div>
 
           <div
-            className={`sticky top-0 z-[1] mb-1 hidden border-b border-[var(--border)] bg-[var(--bg)] pb-2 pt-1 lg:grid ${
+            className={`sticky top-0 z-[1] mb-1 hidden border-b border-[var(--border)] bg-[var(--bg)] pb-2 pt-1 xl:grid ${
               anyHeaderFilterOpen ? "items-end" : "items-center"
             } ${headerGrid} ${compact ? "px-2.5" : "px-4"}`}
           >
@@ -711,6 +713,7 @@ export function NodesPage() {
               node={node}
               status={statuses[node.id]}
               agent={agentStatuses[node.id]}
+              sharingHits={sharing?.by_agent_id[node.id] ?? []}
               selected={selectedIds.has(node.id)}
               density={density}
               onSelectChange={toggleSelect}

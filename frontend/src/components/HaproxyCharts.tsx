@@ -343,7 +343,7 @@ function AgeBars({
 }) {
   const max = Math.max(1, ...buckets.map((b) => b.count));
   return (
-    <div className="grid grid-cols-5 gap-2">
+    <div className="grid grid-cols-5 gap-1 sm:gap-2">
       {buckets.map((b) => (
         <div key={b.label} className="flex flex-col items-center gap-1">
           <div className="flex h-16 w-full items-end rounded bg-[var(--bg-row)] px-1.5 pb-0">

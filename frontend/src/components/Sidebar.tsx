@@ -21,8 +21,8 @@ export function Sidebar({ username, onLogout, open, onClose }: Props) {
       )}
       <aside
         className={[
-          "fixed inset-y-0 left-0 z-50 flex w-[min(220px,85vw)] shrink-0 flex-col border-r border-[var(--border)] bg-[var(--sidebar)] transition-transform duration-200 ease-out",
-          "lg:static lg:z-auto lg:w-[220px] lg:translate-x-0",
+          "fixed inset-y-0 left-0 z-50 flex w-[min(220px,85vw)] shrink-0 flex-col border-r border-[var(--border)] bg-[var(--sidebar)] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] transition-transform duration-200 ease-out",
+          "lg:static lg:z-auto lg:w-[220px] lg:translate-x-0 lg:pt-0 lg:pb-0",
           open ? "translate-x-0" : "-translate-x-full",
         ].join(" ")}
       >

@@ -2,11 +2,12 @@ import { memo, useState } from "react";
 import { api, type RemnaScriptAction } from "../api/client";
 import type { InstallJob } from "../hooks/useAgentInstallQueue";
 import { agentNeedsUpdate, remnanodeNeedsUpdate, warpNeedsInstall } from "../hooks/useRemnawaveVersions";
-import type { AgentStatus, NodeItem, OnlineStatus, SshCheckResult } from "../types";
+import type { AgentStatus, NodeItem, OnlineStatus, SharingUserHit, SshCheckResult } from "../types";
 import { CopyButton } from "./CopyButton";
 import { CountryFlag } from "./CountryFlag";
 import { HostingLogo } from "./HostingLogo";
 import { OnlineBadge } from "./OnlineBadge";
+import { SharedBadge } from "./SharedBadge";
 
 export type NodeListDensity = "comfortable" | "compact";
 
@@ -14,6 +15,7 @@ type Props = {
   node: NodeItem;
   status?: OnlineStatus;
   agent?: AgentStatus;
+  sharingHits?: SharingUserHit[];
   selected: boolean;
   density?: NodeListDensity;
   onSelectChange: (nodeId: string, selected: boolean) => void;
@@ -44,6 +46,7 @@ export const NodeRow = memo(function NodeRow({
   node,
   status,
   agent,
+  sharingHits,
   selected,
   density = "comfortable",
   onSelectChange,
@@ -131,7 +134,7 @@ export const NodeRow = memo(function NodeRow({
       {menuOpen && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
-          <div className="absolute right-0 z-20 mt-1 w-52 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] py-1 shadow-xl">
+          <div className="absolute right-0 z-20 mt-1 w-52 max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] py-1 shadow-xl">
             <button
               type="button"
               className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--accent-dim)]"
@@ -419,8 +422,8 @@ export const NodeRow = memo(function NodeRow({
   );
 
   const desktopGrid = compact
-    ? "lg:grid lg:grid-cols-[28px_56px_minmax(100px,1fr)_minmax(100px,1fr)_48px_minmax(92px,auto)_minmax(48px,auto)_minmax(48px,auto)_minmax(110px,1fr)_minmax(64px,auto)_36px] lg:gap-2"
-    : "lg:grid lg:grid-cols-[32px_120px_minmax(140px,1fr)_minmax(130px,1fr)_90px_minmax(110px,auto)_minmax(56px,auto)_minmax(56px,auto)_minmax(140px,1.1fr)_minmax(100px,auto)_44px] lg:gap-3";
+    ? "xl:grid xl:grid-cols-[28px_56px_minmax(100px,1fr)_minmax(100px,1fr)_48px_minmax(92px,auto)_minmax(48px,auto)_minmax(48px,auto)_minmax(110px,1fr)_minmax(64px,auto)_36px] xl:gap-2"
+    : "xl:grid xl:grid-cols-[32px_120px_minmax(140px,1fr)_minmax(130px,1fr)_90px_minmax(110px,auto)_minmax(56px,auto)_minmax(56px,auto)_minmax(140px,1.1fr)_minmax(100px,auto)_44px] xl:gap-3";
 
   return (
     <>
@@ -441,6 +444,7 @@ export const NodeRow = memo(function NodeRow({
             <div className={`truncate text-[var(--text)] ${compact ? "text-xs font-medium" : "font-medium"}`}>
               {node.name}
             </div>
+            <SharedBadge nodeId={node.id} hits={sharingHits ?? []} compact={compact} />
           </div>
           {!compact && (
             <div className="mt-0.5 truncate text-xs text-[var(--muted)]">
@@ -493,7 +497,7 @@ export const NodeRow = memo(function NodeRow({
       {compact ? (
         <div
           className={[
-            "flex items-center gap-2 rounded-md border bg-[var(--bg-row)] px-2 py-1.5 lg:hidden",
+            "flex items-center gap-2 rounded-md border bg-[var(--bg-row)] px-2 py-1.5 xl:hidden",
             selected ? "border-[var(--accent)]" : "border-[var(--border)]",
           ].join(" ")}
         >
@@ -502,6 +506,7 @@ export const NodeRow = memo(function NodeRow({
           {node.country_code && <CountryFlag code={node.country_code} size={12} />}
           <div className="min-w-0 flex-1">
             <div className="truncate text-xs font-medium text-[var(--text)]">{node.name}</div>
+            <SharedBadge nodeId={node.id} hits={sharingHits ?? []} compact />
             <div className="truncate font-mono text-[10px] text-[var(--muted)]">{node.host}</div>
           </div>
           <div className="hidden min-w-0 max-w-[40%] sm:block">{agentBlock}</div>
@@ -510,7 +515,7 @@ export const NodeRow = memo(function NodeRow({
       ) : (
         <div
           className={[
-            "rounded-[var(--radius)] border bg-[var(--bg-row)] p-3 lg:hidden",
+            "rounded-[var(--radius)] border bg-[var(--bg-row)] p-3 xl:hidden",
             selected ? "border-[var(--accent)]" : "border-[var(--border)]",
           ].join(" ")}
         >
@@ -522,6 +527,7 @@ export const NodeRow = memo(function NodeRow({
                   <OnlineBadge status={status} />
                   {node.country_code && <CountryFlag code={node.country_code} size={14} />}
                   <div className="truncate font-medium text-[var(--text)]">{node.name}</div>
+                  <SharedBadge nodeId={node.id} hits={sharingHits ?? []} />
                 </div>
                 <div className="mt-1 truncate text-xs text-[var(--muted)]">
                   {node.ssh_user}@{node.host}:{node.ssh_port}
@@ -545,7 +551,7 @@ export const NodeRow = memo(function NodeRow({
             {authBlock}
           </div>
 
-          <div className="mt-3 grid grid-cols-4 gap-3 border-t border-[var(--border)] pt-3">
+          <div className="mt-3 grid grid-cols-2 gap-3 border-t border-[var(--border)] pt-3 sm:grid-cols-4">
             <div>{versionsBlock}</div>
             <div>{warpBlock}</div>
             <div>{haproxyBlock}</div>

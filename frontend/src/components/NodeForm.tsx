@@ -140,7 +140,7 @@ export function NodeForm({
       storageKey="node-form"
       defaultWidth={720}
       defaultHeight={800}
-      minWidth={500}
+      minWidth={360}
       minHeight={440}
       zClass="z-50"
     >
@@ -166,7 +166,7 @@ export function NodeForm({
             })();
           }}
         >
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field label="Название">
               <input required value={values.name} onChange={(e) => set("name", e.target.value)} className={inputCls} />
             </Field>
@@ -381,7 +381,7 @@ export function NodeForm({
             </div>
           )}
 
-          <div className="flex justify-end gap-2 pt-2 pr-2">
+          <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end sm:pr-2">
             <button type="button" onClick={onClose} className={btnGhost}>
               Отмена
             </button>
@@ -407,7 +407,7 @@ const inputCls =
   "w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--text)] outline-none transition focus:border-[var(--accent)]";
 
 const btnPrimary =
-  "rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#06221e] transition hover:brightness-110 disabled:opacity-60";
+  "rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-semibold text-[#06221e] transition hover:brightness-110 disabled:opacity-60 sm:py-2";
 
 const btnGhost =
-  "rounded-lg border border-[var(--border)] px-4 py-2 text-sm text-[var(--muted)] transition hover:text-[var(--text)]";
+  "rounded-lg border border-[var(--border)] px-4 py-2.5 text-sm text-[var(--muted)] transition hover:text-[var(--text)] sm:py-2";

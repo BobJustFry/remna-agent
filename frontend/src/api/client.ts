@@ -8,6 +8,8 @@ import type {
   NodeItem,
   NodesMetricsResponse,
   OnlineMap,
+  SharingDossier,
+  SharingStatus,
   SshCheckResult,
 } from "../types";
 
@@ -98,6 +100,11 @@ export const api = {
       signal: opts.signal,
       onEvent: opts.onEvent,
     }),
+  sharingStatus: () => request<SharingStatus>("/api/sharing/status"),
+  sharingScan: () =>
+    request<SharingStatus>("/api/sharing/scan", { method: "POST" }),
+  sharingDossier: (nodeId: string) =>
+    request<SharingDossier>(`/api/sharing/nodes/${nodeId}/dossier`),
   sshCheck: (id: string) =>
     request<SshCheckResult>(`/api/nodes/${id}/ssh-check`, { method: "POST" }),
   rebootNode: (id: string) =>

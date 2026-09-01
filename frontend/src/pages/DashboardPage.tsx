@@ -157,13 +157,13 @@ export function DashboardPage() {
   );
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <header
         className={`flex flex-col gap-3 border-b border-[var(--border)] sm:flex-row sm:items-center sm:justify-between sm:px-6 ${
           tab === "tiles" ? "px-3 py-2" : "px-4 py-4 sm:px-6"
         }`}
       >
-        <div className="min-w-0">
+        <div className="min-w-0 max-lg:hidden">
           <h1 className={`font-semibold tracking-tight ${tab === "tiles" ? "text-base" : "text-xl"}`}>
             Дашборд
           </h1>
@@ -173,7 +173,7 @@ export function DashboardPage() {
             </p>
           )}
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2 lg:ml-auto">
           <button
             type="button"
             onClick={() => {
@@ -196,7 +196,7 @@ export function DashboardPage() {
       </header>
 
       <div className="border-b border-[var(--border)] px-3 sm:px-6">
-        <nav className="-mb-px flex gap-1 overflow-x-auto" aria-label="Разделы дашборда">
+        <nav className="no-scrollbar -mb-px flex gap-1 overflow-x-auto overscroll-x-contain" aria-label="Разделы дашборда">
           {TABS.map((t) => {
             const active = tab === t.id;
             const badge =
@@ -246,8 +246,8 @@ export function DashboardPage() {
       <div
         className={
           tab === "tiles"
-            ? "min-h-0 flex-1 px-1.5 py-1.5"
-            : "flex-1 space-y-4 overflow-auto px-3 py-3 sm:px-6 sm:py-4"
+            ? "min-h-0 flex-1 overflow-hidden px-1.5 py-1.5"
+            : "min-h-0 flex-1 space-y-4 overflow-auto px-3 py-3 sm:px-6 sm:py-4"
         }
       >
         {tab === "tiles" && (
@@ -311,7 +311,7 @@ export function DashboardPage() {
               </Panel>
             </section>
 
-            <section className="grid gap-2 sm:grid-cols-3">
+            <section className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
               <QuickLink to="/nodes" title="Ноды" desc="Список, SSH, агент, RemnaNode" />
               <QuickLink to="/hostings" title="Хостинги" desc="Справочник и favicon" />
               <QuickLink to="/scripts" title="Скрипты" desc="Дефолты RemnaNode" />
@@ -439,8 +439,45 @@ export function DashboardPage() {
             {stats.versions.length === 0 ? (
               <Empty text="Нет нод с данными агента." />
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[520px] text-left text-sm">
+              <>
+                <ul className="space-y-2 md:hidden">
+                  {stats.versions.map((row) => (
+                    <li
+                      key={row.node.id}
+                      className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="truncate font-medium text-[var(--text)]">{row.node.name}</div>
+                          <div className="truncate font-mono text-[11px] text-[var(--muted)]">{row.node.host}</div>
+                        </div>
+                        {row.agentOutdated || row.remnaOutdated ? (
+                          <span className="shrink-0 rounded-full border border-[rgba(230,162,60,0.35)] bg-[rgba(230,162,60,0.1)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--warning)]">
+                            Устарело
+                          </span>
+                        ) : (
+                          <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--muted)]">OK</span>
+                        )}
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-2 text-[11px]">
+                        <div>
+                          <div className="text-[var(--muted)]">Агент</div>
+                          <div className={row.agentOutdated ? "text-[var(--warning)]" : "text-[var(--text)]"}>
+                            {row.agentVersion ? `v${row.agentVersion}` : "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[var(--muted)]">RemnaNode</div>
+                          <div className={row.remnaOutdated ? "text-[var(--warning)]" : "text-[var(--text)]"}>
+                            {row.remnaVersion ? `v${row.remnaVersion}` : row.remnaRunning ? "?" : "—"}
+                          </div>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                <div className="hidden overflow-x-auto md:block">
+                  <table className="w-full min-w-[520px] text-left text-sm">
                   <thead>
                     <tr className="border-b border-[var(--border)] text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--muted)]">
                       <th className="pb-2 pr-3 font-semibold">Нода</th>
@@ -490,6 +527,7 @@ export function DashboardPage() {
                   </tbody>
                 </table>
               </div>
+              </>
             )}
           </Panel>
         )}
@@ -819,7 +857,7 @@ function Panel({
 }) {
   return (
     <section className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] p-4">
-      <div className="mb-3 flex items-start justify-between gap-3">
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-sm font-semibold text-[var(--text)]">{title}</h2>
           {subtitle && <p className="mt-0.5 text-xs text-[var(--muted)]">{subtitle}</p>}

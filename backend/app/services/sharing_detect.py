@@ -1,0 +1,499 @@
+"""Детектор шаринга по уникальным клиентским IP Xray (GetStatsOnlineIpList).
+
+Не путать с ss ESTAB / proxy_peers: xHTTP держит пачку TCP на один IP.
+Порог — разные исходные адреса одного UUID, не число сокетов.
+"""
+from __future__ import annotations
+
+import ipaddress
+import logging
+import threading
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from app.services.remnawave_api import RemnawaveApiError, rw_api, rw_nodes
+
+log = logging.getLogger("remna.sharing")
+
+# Живой туннель: lastSeen не старше этого.
+WIN_5 = timedelta(minutes=5)
+WIN_15 = timedelta(minutes=15)
+
+# Один человек: 1 IP, реже 2–3 (LTE+Wi‑Fi / CGNAT).
+# 8+ разных IP за 5 мин — ферма. 5+ разных /16 — не один домашний NAT.
+BAN_IPS_5M = 8
+BAN_SLASH16_5M = 5
+BAN_IPS_15M = 12
+
+SKIP_PREFIX = "hop-"
+
+YANDEX_CLOUD = [
+    ipaddress.ip_network("188.72.110.0/23"),
+    ipaddress.ip_network("84.201.0.0/16"),
+    ipaddress.ip_network("51.250.0.0/16"),
+    ipaddress.ip_network("178.154.192.0/18"),
+]
+
+_lock = threading.Lock()
+_snapshot: dict[str, Any] = {
+    "scanned_at": None,
+    "error": None,
+    "scanning": False,
+    "online_users": 0,
+    "flagged": 0,
+    "by_agent_id": {},
+    "thresholds": {
+        "ips_5m": BAN_IPS_5M,
+        "slash16_5m": BAN_SLASH16_5M,
+        "ips_15m": BAN_IPS_15M,
+    },
+}
+
+
+def snapshot() -> dict[str, Any]:
+    with _lock:
+        return {
+            "scanned_at": _snapshot.get("scanned_at"),
+            "error": _snapshot.get("error"),
+            "scanning": _snapshot.get("scanning"),
+            "online_users": _snapshot.get("online_users"),
+            "flagged": _snapshot.get("flagged"),
+            "by_agent_id": dict(_snapshot.get("by_agent_id") or {}),
+            "thresholds": dict(_snapshot.get("thresholds") or {}),
+        }
+
+
+def mark_error(message: str) -> None:
+    with _lock:
+        _snapshot["error"] = message
+        _snapshot["scanning"] = False
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_ts(val: Any) -> datetime | None:
+    if not val:
+        return None
+    if isinstance(val, datetime):
+        return val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+    s = str(val).replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _norm_host(s: str) -> str:
+    return (s or "").strip().lower()
+
+
+def _slash16(ip: str) -> str | None:
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return None
+    return f"{parts[0]}.{parts[1]}.0.0/16"
+
+
+def in_yandex_cloud(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in YANDEX_CLOUD)
+
+
+def _tb(n: Any) -> str:
+    try:
+        b = int(n or 0)
+    except (TypeError, ValueError):
+        return "0"
+    if b >= 10**12:
+        return f"{b / 1e12:.2f} ТБ"
+    if b >= 10**9:
+        return f"{b / 1e9:.2f} ГБ"
+    if b >= 10**6:
+        return f"{b / 1e6:.1f} МБ"
+    return f"{b} Б"
+
+
+def _remain(expire: Any) -> str:
+    dt = _parse_ts(expire)
+    if not dt:
+        return "—"
+    days = (dt - _now()).total_seconds() / 86400
+    if days < 0:
+        return f"истекла {abs(days):.1f} дн. назад ({dt.date()})"
+    return f"{days:.1f} дн. (до {dt.date()})"
+
+
+def _try_api(path: str, method: str = "GET", body: dict | None = None) -> Any:
+    try:
+        return rw_api(path, method, body)
+    except RemnawaveApiError as exc:
+        return {"_error": str(exc)}
+
+
+def _job_id(payload: Any) -> str | None:
+    if not isinstance(payload, dict) or payload.get("_error"):
+        return None
+    jid = payload.get("jobId") or payload.get("id")
+    return str(jid) if jid else None
+
+
+def _poll_jobs(jobs: list[tuple[str, str, str]]) -> dict[str, dict]:
+    pending = {jid: (uuid, name) for uuid, name, jid in jobs}
+    results: dict[str, dict] = {}
+    t0 = time.time()
+    while pending and time.time() - t0 < 240:
+        time.sleep(1.2)
+        done = []
+        for jid, (uuid, name) in list(pending.items()):
+            r = _try_api(f"/api/connections/by-node/{jid}")
+            if not isinstance(r, dict) or r.get("_error"):
+                r = _try_api(f"/api/connections/by-node/result/{jid}")
+            if not isinstance(r, dict):
+                continue
+            if r.get("isFailed"):
+                results[uuid] = {"_nodeName": name, "users": []}
+                done.append(jid)
+                continue
+            if r.get("isCompleted"):
+                result = r.get("result") or {}
+                if not isinstance(result, dict):
+                    result = {}
+                result["_nodeName"] = name
+                result["_nodeUuid"] = uuid
+                results[uuid] = result
+                done.append(jid)
+        for jid in done:
+            pending.pop(jid, None)
+    for jid, (uuid, name) in pending.items():
+        results[uuid] = {"_nodeName": name, "users": []}
+    return results
+
+
+def _reasons(ips_5m: int, s16_5m: int, ips_15m: int) -> list[str]:
+    why = []
+    if ips_5m >= BAN_IPS_5M:
+        why.append(f"уникальных клиентских IP за 5 мин: {ips_5m} (порог {BAN_IPS_5M})")
+    if s16_5m >= BAN_SLASH16_5M:
+        why.append(f"разных /16 за 5 мин: {s16_5m} (порог {BAN_SLASH16_5M}) — не один CGNAT")
+    if ips_15m >= BAN_IPS_15M:
+        why.append(f"уникальных IP за 15 мин: {ips_15m} (порог {BAN_IPS_15M})")
+    return why
+
+
+def _unwrap_user(payload: Any) -> dict:
+    if not isinstance(payload, dict) or payload.get("_error"):
+        return {}
+    if payload.get("id") is not None:
+        return payload
+    inner = payload.get("user") or payload.get("response")
+    return inner if isinstance(inner, dict) else {}
+
+
+@dataclass
+class _UserStat:
+    uid: int
+    rows: list[dict] = field(default_factory=list)
+    ips_5m: int = 0
+    ips_15m: int = 0
+    s16_5m: int = 0
+    nodes: list[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+    username: str = ""
+
+
+_flagged_stats: dict[int, _UserStat] = {}
+
+
+def _collect_stats(node_results: dict[str, dict]) -> dict[int, _UserStat]:
+    by_user: dict[int, _UserStat] = {}
+    now = _now()
+    for uuid, payload in node_results.items():
+        nname = payload.get("_nodeName") or uuid[:8]
+        addr = payload.get("_address") or ""
+        for row in payload.get("users") or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                uid = int(row.get("userId"))
+            except (TypeError, ValueError):
+                continue
+            st = by_user.setdefault(uid, _UserStat(uid=uid))
+            for item in row.get("ips") or []:
+                ip = item.get("ip") if isinstance(item, dict) else item
+                seen = item.get("lastSeen") if isinstance(item, dict) else None
+                if not ip:
+                    continue
+                ip = str(ip).replace("::ffff:", "")
+                st.rows.append({
+                    "ip": ip,
+                    "lastSeen": seen,
+                    "node": nname,
+                    "node_uuid": uuid,
+                    "address": addr,
+                })
+    for st in by_user.values():
+        def fresh(delta: timedelta) -> list[dict]:
+            out = []
+            for r in st.rows:
+                ts = _parse_ts(r["lastSeen"])
+                if ts and now - ts <= delta:
+                    out.append(r)
+            return out
+
+        r5, r15 = fresh(WIN_5), fresh(WIN_15)
+        i5 = {r["ip"] for r in r5}
+        i15 = {r["ip"] for r in r15}
+        s16 = {_slash16(ip) for ip in i5}
+        s16.discard(None)
+        st.ips_5m = len(i5)
+        st.ips_15m = len(i15)
+        st.s16_5m = len(s16)
+        st.nodes = sorted({r["node"] for r in st.rows})
+        st.reasons = _reasons(st.ips_5m, st.s16_5m, st.ips_15m)
+    return by_user
+
+
+def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
+    """agent_nodes: (agent_id, name, host). Sync — вызывать из to_thread."""
+    try:
+        rw = rw_nodes()
+    except RemnawaveApiError as exc:
+        err = str(exc)
+        mark_error(err)
+        return snapshot()
+    jobs: list[tuple[str, str, str]] = []
+    addr_by_uuid: dict[str, str] = {}
+    for n in rw:
+        if not isinstance(n, dict) or n.get("isDisabled"):
+            continue
+        uuid = n.get("uuid")
+        if not uuid:
+            continue
+        name = n.get("name") or uuid
+        addr_by_uuid[str(uuid)] = str(n.get("address") or "")
+        job = _try_api(f"/api/connections/by-node/{uuid}", "POST", {})
+        jid = _job_id(job)
+        if not jid:
+            log.warning("sharing job skip %s: %s", name, job)
+            continue
+        jobs.append((str(uuid), str(name), jid))
+
+    node_results = _poll_jobs(jobs)
+    for uuid, payload in node_results.items():
+        payload["_address"] = addr_by_uuid.get(uuid, "")
+
+    stats = _collect_stats(node_results)
+    flagged: list[_UserStat] = []
+    for st in stats.values():
+        if not st.reasons:
+            continue
+        card = _unwrap_user(_try_api(f"/api/users/{st.uid}"))
+        name = (card.get("username") or "").lower()
+        if name.startswith(SKIP_PREFIX):
+            continue
+        st.username = str(card.get("username") or "")
+        flagged.append(st)
+
+    with _lock:
+        _flagged_stats.clear()
+        _flagged_stats.update({st.uid: st for st in flagged})
+
+    host_to_agent: dict[str, str] = {}
+    for aid, _aname, host in agent_nodes:
+        host_to_agent[_norm_host(host)] = aid
+
+    by_agent: dict[str, list[dict]] = defaultdict(list)
+    for st in flagged:
+        seen_agents: set[str] = set()
+        for r in st.rows:
+            ts = _parse_ts(r["lastSeen"])
+            if not ts or _now() - ts > WIN_15:
+                continue
+            aid = host_to_agent.get(_norm_host(str(r.get("address") or "")))
+            if not aid or aid in seen_agents:
+                continue
+            seen_agents.add(aid)
+            on_node = {
+                x["ip"]
+                for x in st.rows
+                if _norm_host(str(x.get("address") or "")) == _norm_host(str(r.get("address") or ""))
+            }
+            by_agent[aid].append({
+                "user_id": st.uid,
+                "username": st.username,
+                "ips_5m": st.ips_5m,
+                "ips_15m": st.ips_15m,
+                "s16_5m": st.s16_5m,
+                "ips_on_node": len(on_node),
+                "reasons": st.reasons,
+                "rw_nodes": st.nodes,
+            })
+
+    out = {
+        "scanned_at": _now().isoformat(),
+        "error": None,
+        "scanning": False,
+        "online_users": len(stats),
+        "flagged": len(flagged),
+        "by_agent_id": dict(by_agent),
+        "thresholds": {
+            "ips_5m": BAN_IPS_5M,
+            "slash16_5m": BAN_SLASH16_5M,
+            "ips_15m": BAN_IPS_15M,
+        },
+    }
+    with _lock:
+        _snapshot.update(out)
+    log.info("sharing scan: online=%s flagged=%s nodes=%s", len(stats), len(flagged), len(by_agent))
+    return out
+
+
+def _fmt_user_header(u: dict) -> list[str]:
+    ut = u.get("userTraffic") or {}
+    squads = u.get("activeInternalSquads") or []
+    squad_names = ", ".join(
+        s.get("name") or "" for s in squads if isinstance(s, dict)
+    )
+    return [
+        f"ID: {u.get('id')}",
+        f"username: {u.get('username')}",
+        f"status: {u.get('status')}",
+        f"telegramId: {u.get('telegramId')}",
+        f"email: {u.get('email')}",
+        f"tag: {u.get('tag')}",
+        f"description: {u.get('description')}",
+        f"createdAt: {u.get('createdAt')}",
+        f"expireAt: {u.get('expireAt')}",
+        f"подписка: {_remain(u.get('expireAt'))}",
+        f"hwidDeviceLimit: {u.get('hwidDeviceLimit')}",
+        f"trafficLimit: {_tb(u.get('trafficLimitBytes'))} ({u.get('trafficLimitStrategy')})",
+        f"usedTraffic: {_tb(ut.get('usedTrafficBytes'))}",
+        f"lifetimeTraffic: {_tb(ut.get('lifetimeUsedTrafficBytes'))}",
+        f"firstConnectedAt: {ut.get('firstConnectedAt')}",
+        f"onlineAt: {ut.get('onlineAt')}",
+        f"squads: {squad_names or '—'}",
+        f"updatedAt: {u.get('updatedAt')}",
+    ]
+
+
+def build_dossier(user_id: int) -> str:
+    """Текст досье как в remnawave/SHARING/{id}.txt."""
+    card = _unwrap_user(_try_api(f"/api/users/{user_id}"))
+    if not card:
+        return f"# SHARING dossier  user {user_id}\nне найден в Remnawave\n"
+
+    hwid = _try_api(f"/api/hwid/devices/{user_id}")
+    hist = _try_api(f"/api/users/{user_id}/subscription-request-history?size=1000&start=0")
+    devices = hwid.get("devices") or [] if isinstance(hwid, dict) else []
+    recs = hist.get("records") or [] if isinstance(hist, dict) else []
+    sub_ips = sorted({r.get("requestIp") for r in recs if isinstance(r, dict) and r.get("requestIp")})
+    yc = sum(1 for ip in sub_ips if in_yandex_cloud(str(ip)))
+
+    snap = snapshot()
+    hits = []
+    for users in (snap.get("by_agent_id") or {}).values():
+        for u in users:
+            if u.get("user_id") == user_id:
+                hits.append(u)
+    reasons = hits[0]["reasons"] if hits else []
+    ips_5m = hits[0]["ips_5m"] if hits else 0
+    ips_15m = hits[0]["ips_15m"] if hits else 0
+    s16_5m = hits[0]["s16_5m"] if hits else 0
+    rw_nodes = hits[0].get("rw_nodes") if hits else []
+    with _lock:
+        st = _flagged_stats.get(user_id)
+
+    # Live IPs: one more by-user is not available; reuse last scan reasons.
+    lines = [
+        f"# SHARING dossier  user {user_id}",
+        f"# snapshot {_now().isoformat()}",
+        "",
+        "## Пользователь",
+        *_fmt_user_header(card),
+        "",
+        "## Решение",
+        "ШАРИНГ: да" if reasons else "ШАРИНГ: нет в последнем скане (карточка всё равно собрана)",
+    ]
+    for w in reasons:
+        lines.append(f"- {w}")
+    lines += [
+        "",
+        "## Доказательства шаринга",
+        f"ноды: {', '.join(rw_nodes) if rw_nodes else '—'}",
+        f"уникальных клиентских IP  5 мин: {ips_5m}",
+        f"уникальных клиентских IP 15 мин: {ips_15m}",
+        f"разных /16 за 5 мин: {s16_5m}  (один человек обычно 1–3 сети)",
+        f"HWID записей: {len(devices)}  лимит: {card.get('hwidDeviceLimit')}",
+    ]
+    for d in devices:
+        if not isinstance(d, dict):
+            continue
+        lines.append(
+            f"  hwid={d.get('hwid')} platform={d.get('platform')} "
+            f"os={d.get('osVersion')} model={d.get('deviceModel')} "
+            f"ua={d.get('userAgent')} ip={d.get('requestIp')} "
+            f"updated={d.get('updatedAt')}"
+        )
+    if len(devices) <= 1 and ips_5m >= BAN_IPS_5M:
+        lines.append(
+            "  HWID не бьётся с числом IP: либо клон x-hwid, либо лимит не смотрит туннель."
+        )
+    lines.append(f"запросов подписки в history: {len(recs)}, уникальных IP фетча: {len(sub_ips)}")
+    lines.append(f"из них Yandex.Cloud: {yc}")
+    if sub_ips:
+        lines.append("IP фетча подписки:")
+        for ip in sub_ips:
+            mark = "  [Yandex.Cloud]" if in_yandex_cloud(str(ip)) else ""
+            lines.append(f"  {ip}{mark}")
+    buckets: dict[str, list[str]] = defaultdict(list)
+    for ip in sub_ips:
+        parts = str(ip).split(".")
+        if len(parts) == 4:
+            buckets[".".join(parts[:3]) + ".0/24"].append(str(ip))
+    fat = {k: v for k, v in buckets.items() if len(v) >= 4}
+    if fat:
+        lines.append("кластеры фетча (≥4 IP в одном /24) — типичная VPC/локалка, не домашний роутер:")
+        for net, ips in sorted(fat.items(), key=lambda x: -len(x[1])):
+            lines.append(f"  {net}: {len(ips)}  {', '.join(ips)}")
+    lines.append("")
+    lines.append("клиентские IP туннеля за 5 мин (источник входа на ноду, не сайты):")
+    if st is not None:
+        by_node: dict[str, list[str]] = defaultdict(list)
+        seen_ip: set[str] = set()
+        now = _now()
+        for r in st.rows:
+            ts = _parse_ts(r["lastSeen"])
+            if not ts or now - ts > WIN_5:
+                continue
+            if r["ip"] in seen_ip:
+                continue
+            seen_ip.add(r["ip"])
+            by_node[r["node"]].append(f"{r['ip']}  lastSeen={r['lastSeen']}")
+        for node, items in sorted(by_node.items()):
+            lines.append(f"  [{node}] {len(items)}")
+            for it in items:
+                lines.append(f"    {it}")
+    else:
+        lines.append("  (нет снимка сессий — дождитесь скана)")
+    lines.append("")
+    lines.append(
+        "Порог: уникальные IP Xray (вход на ноду), не TCP ss. "
+        f"Шаринг если IP за 5 мин ≥ {BAN_IPS_5M} ИЛИ /16 за 5 мин ≥ {BAN_SLASH16_5M} "
+        f"ИЛИ IP за 15 мин ≥ {BAN_IPS_15M}."
+    )
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def build_node_dossier(user_ids: list[int]) -> str:
+    parts = [build_dossier(uid) for uid in user_ids]
+    return "\n\n".join(parts) if parts else "на этой ноде шаринг в последнем скане не найден\n"

@@ -27,11 +27,13 @@ function readStored(key: string): Size | null {
 }
 
 function clampSize(size: Size, minW: number, minH: number): Size {
-  const maxW = Math.max(minW, window.innerWidth - 24);
-  const maxH = Math.max(minH, window.innerHeight - 24);
+  const maxW = Math.max(240, window.innerWidth - 24);
+  const maxH = Math.max(240, window.innerHeight - 24);
+  const loW = Math.min(minW, maxW);
+  const loH = Math.min(minH, maxH);
   return {
-    w: Math.min(maxW, Math.max(minW, size.w)),
-    h: Math.min(maxH, Math.max(minH, size.h)),
+    w: Math.min(maxW, Math.max(loW, size.w)),
+    h: Math.min(maxH, Math.max(loH, size.h)),
   };
 }
 

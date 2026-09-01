@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 import { api, type RemnaScriptAction, type RemnaScriptRunBody, type RemnawaveVersions } from "../api/client";
 import { useNodesAgents } from "../hooks/useNodesAgents";
 import { useNodesOnline } from "../hooks/useNodesOnline";
@@ -44,7 +44,17 @@ export type AppOutletContext = {
   refreshRemnawaveVersions: (force?: boolean) => Promise<RemnawaveVersions | void>;
 };
 
+const PAGE_TITLES: Record<string, string> = {
+  "/": "Дашборд",
+  "/nodes": "Ноды",
+  "/hostings": "Хостинги",
+  "/scripts": "Скрипты",
+  "/settings": "Настройки",
+};
+
 export function AppShell({ username, onLogout }: Props) {
+  const location = useLocation();
+  const pageTitle = PAGE_TITLES[location.pathname] ?? "Remna Agent";
   const [nodes, setNodes] = useState<NodeItem[]>([]);
   const [hostings, setHostings] = useState<HostingItem[]>([]);
   const [navOpen, setNavOpen] = useState(false);
@@ -101,6 +111,10 @@ export function AppShell({ username, onLogout }: Props) {
     void reloadNodes().catch(() => undefined);
     void reloadHostings().catch(() => undefined);
   }, [reloadNodes, reloadHostings]);
+
+  useEffect(() => {
+    setNavOpen(false);
+  }, [location.pathname]);
 
   const openScriptRun = useCallback((targetNodes: NodeItem[], action: RemnaScriptAction) => {
     if (action === "update") {
@@ -211,28 +225,29 @@ export function AppShell({ username, onLogout }: Props) {
   const latestNode = remnawaveVersions?.node_version;
 
   return (
-    <div className="flex h-dvh overflow-hidden">
+    <div className="flex h-dvh max-h-dvh overflow-hidden overscroll-none">
       <Sidebar
         username={username}
         onLogout={onLogout}
         open={navOpen}
         onClose={() => setNavOpen(false)}
       />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--border)] bg-[var(--sidebar)] px-3 lg:hidden">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-clip">
+        <div className="flex h-[calc(3rem+env(safe-area-inset-top,0px))] shrink-0 items-center gap-3 border-b border-[var(--border)] bg-[var(--sidebar)] px-3 pt-[env(safe-area-inset-top,0px)] lg:hidden">
           <button
             type="button"
             onClick={() => setNavOpen(true)}
-            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--border)] text-[var(--text)]"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-lg border border-[var(--border)] text-[var(--text)]"
             aria-label="Открыть меню"
           >
             <MenuIcon />
           </button>
           <div className="min-w-0">
-            <div className="truncate text-sm font-semibold">Remna Agent</div>
+            <div className="truncate text-sm font-semibold">{pageTitle}</div>
+            <div className="truncate text-[10px] text-[var(--muted)]">Remna Agent</div>
           </div>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto">
+        <div className="min-h-0 flex-1 overflow-hidden">
           <Outlet context={ctx} />
         </div>
         {trayJobs.length > 0 && (

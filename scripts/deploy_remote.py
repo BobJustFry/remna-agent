@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upload the current git HEAD to a VPS and start docker compose prod.
+"""Upload the working tree to the production VPS and rebuild compose.
 
 Credentials come from the environment, never from the repo:
 
@@ -7,14 +7,15 @@ Credentials come from the environment, never from the repo:
 
 If /opt/remna-agent/.env already exists, it is kept (update deploy).
 A new .env is generated only on first install.
+Never ships local .env, postgres data, or docker-compose.override.yml.
 """
 
 from __future__ import annotations
 
 import os
 import secrets
-import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
 
@@ -23,9 +24,30 @@ import paramiko
 ROOT = Path(__file__).resolve().parents[1]
 SECRETS = ROOT / "deploy" / "secrets"
 
-
-def run(cmd: list[str]) -> None:
-    subprocess.check_call(cmd, cwd=ROOT)
+_SKIP_DIRS = {
+    ".git",
+    ".cursor",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".idea",
+    ".vscode",
+    "coverage",
+    ".docker-data",
+}
+_SKIP_REL = {
+    "docker-compose.override.yml",
+    "deploy/secrets",
+    "data/postgres",
+    "data/backups",
+    "data/wgcf",
+}
 
 
 def connect() -> paramiko.SSHClient:
@@ -43,6 +65,29 @@ def connect() -> paramiko.SSHClient:
         look_for_keys=False,
     )
     return client
+
+
+def _skip(path: Path) -> bool:
+    rel = path.relative_to(ROOT).as_posix()
+    if any(part in _SKIP_DIRS for part in path.relative_to(ROOT).parts):
+        return True
+    if rel in _SKIP_REL or any(rel.startswith(p + "/") for p in _SKIP_REL):
+        return True
+    name = path.name
+    if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
+        return True
+    if name.endswith((".pyc", ".log", ".tar.gz")):
+        return True
+    return False
+
+
+def pack_tree(archive: Path) -> None:
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive, "w:gz") as tar:
+        for path in ROOT.rglob("*"):
+            if not path.is_file() or _skip(path):
+                continue
+            tar.add(path, arcname=path.relative_to(ROOT).as_posix())
 
 
 def sh(client: paramiko.SSHClient, command: str, timeout: int = 120) -> str:
@@ -90,7 +135,8 @@ def main() -> int:
     domain = os.environ.get("DEPLOY_DOMAIN", "ragent.bob4.fun")
     SECRETS.mkdir(parents=True, exist_ok=True)
     archive = SECRETS / "remna-agent.tar.gz"
-    run(["git", "archive", "--format=tar.gz", "-o", str(archive), "HEAD"])
+    pack_tree(archive)
+    print(f"packed {archive.stat().st_size} bytes")
 
     client = connect()
     try:
@@ -150,7 +196,8 @@ fi
             "cd /opt/remna-agent && docker compose "
             "-f docker-compose.yml -f docker-compose.prod.yml up -d --build"
         )
-        print(sh(client, compose, timeout=900))
+        compose_out = sh(client, compose, timeout=900)
+    sys.stdout.buffer.write((compose_out + "\n").encode("utf-8", "replace"))
         print(sh(
             client,
             "docker exec bob4fun-geodat-editor-caddy-1 caddy reload --config /etc/caddy/Caddyfile",
