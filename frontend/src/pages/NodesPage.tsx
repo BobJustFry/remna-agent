@@ -12,8 +12,6 @@ import {
   AgentInstallConfirmDialog,
   type InstallIntent,
 } from "../components/AgentInstallConfirmDialog";
-import { AgentInstallLogDialog } from "../components/AgentInstallLogDialog";
-import { AgentInstallTray } from "../components/AgentInstallTray";
 import type { AppOutletContext } from "../components/AppShell";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CapacityDialog } from "../components/CapacityDialog";
@@ -21,7 +19,6 @@ import { DestPickDialog } from "../components/DestPickDialog";
 import { HaproxyDialog } from "../components/HaproxyDialog";
 import { NodeForm } from "../components/NodeForm";
 import { NodeRow, type NodeListDensity } from "../components/NodeRow";
-import { useAgentInstallQueue } from "../hooks/useAgentInstallQueue";
 import { remnanodeNeedsUpdate, warpNeedsInstall } from "../hooks/useRemnawaveVersions";
 import type { NodeFormValues, NodeItem } from "../types";
 
@@ -56,6 +53,9 @@ export function NodesPage() {
     openScriptRun,
     openWarpInstall,
     openCf204Install,
+    installJobs,
+    enqueueAgentInstall,
+    openAgentInstallLog,
     scriptBusy,
     remnawaveVersions,
     latestAgentVersion,
@@ -85,7 +85,6 @@ export function NodesPage() {
   const [pendingReboot, setPendingReboot] = useState<NodeItem[] | null>(null);
   const [rebootBusy, setRebootBusy] = useState(false);
   const [rebootingIds, setRebootingIds] = useState<Set<string>>(() => new Set());
-  const [viewJobId, setViewJobId] = useState<string | null>(null);
   const [haproxyNode, setHaproxyNode] = useState<NodeItem | null>(null);
   const [haproxyBusyId, setHaproxyBusyId] = useState<string | null>(null);
   const [destNode, setDestNode] = useState<NodeItem | null>(null);
@@ -100,35 +99,10 @@ export function NodesPage() {
     }
   }, [density]);
 
-  const onNodeUpdated = useCallback(
-    (updated: NodeItem) => {
-      setNodes((prev) => prev.map((n) => (n.id === updated.id ? updated : n)));
-    },
-    [setNodes],
-  );
-
   const compact = density === "compact";
   const headerGrid = compact
     ? "lg:grid-cols-[28px_56px_minmax(100px,1fr)_minmax(100px,1fr)_48px_minmax(92px,auto)_minmax(48px,auto)_minmax(48px,auto)_minmax(110px,1fr)_minmax(64px,auto)_36px] lg:gap-2"
     : "lg:grid-cols-[32px_120px_minmax(140px,1fr)_minmax(130px,1fr)_90px_minmax(110px,auto)_minmax(56px,auto)_minmax(56px,auto)_minmax(140px,1.1fr)_minmax(100px,auto)_44px] lg:gap-3";
-
-  const {
-    jobs,
-    jobList,
-    enqueue,
-    cancel,
-    retry,
-    dismiss,
-    dismissFinished,
-    activeCount,
-    doneCount,
-    errorCount,
-  } = useAgentInstallQueue({
-    onNodeUpdated,
-    onIdle: () => {
-      void refreshAgents();
-    },
-  });
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -305,7 +279,7 @@ export function NodesPage() {
   function startConfirmedInstall(installDeps: boolean) {
     if (!confirmInstall || confirmInstall.nodes.length === 0) return;
     const targets = confirmInstall.nodes;
-    enqueue(targets, installDeps);
+    enqueueAgentInstall(targets, installDeps);
     setConfirmInstall(null);
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -313,7 +287,7 @@ export function NodesPage() {
       return next;
     });
     if (targets.length === 1) {
-      setViewJobId(targets[0].id);
+      openAgentInstallLog(targets[0].id);
     }
   }
 
@@ -367,9 +341,6 @@ export function NodesPage() {
       setRebootingIds(new Set());
     }
   }
-
-  const viewJob = viewJobId ? jobs[viewJobId] : undefined;
-  const viewNode = viewJob ? nodes.find((n) => n.id === viewJob.nodeId) : undefined;
 
   return (
     <div className="flex h-full flex-col">
@@ -744,7 +715,7 @@ export function NodesPage() {
               selected={selectedIds.has(node.id)}
               density={density}
               onSelectChange={toggleSelect}
-              installJob={jobs[node.id]}
+              installJob={installJobs[node.id]}
               onEdit={(n) => {
                 setEditing(n);
                 setFormError(null);
@@ -772,21 +743,11 @@ export function NodesPage() {
               latestRemnanodeVersion={latestNodeVersion}
               latestAgentVersion={latestAgentVersion}
               latestWgcfVersion={latestWgcfVersion}
-              onOpenInstallLog={(id) => setViewJobId(id)}
+              onOpenInstallLog={openAgentInstallLog}
               rebooting={rebootingIds.has(node.id)}
             />
           ))}
         </div>
-
-        <AgentInstallTray
-          jobs={jobList}
-          activeCount={activeCount}
-          doneCount={doneCount}
-          errorCount={errorCount}
-          onOpen={(id) => setViewJobId(id)}
-          onCancel={cancel}
-          onDismissFinished={dismissFinished}
-        />
       </div>
 
       {capacityNode && (
@@ -881,18 +842,6 @@ export function NodesPage() {
         }}
         onConfirm={() => void confirmReboot()}
       />
-
-      {viewJob && (
-        <AgentInstallLogDialog
-          job={viewJob}
-          onClose={() => setViewJobId(null)}
-          onCancel={() => cancel(viewJob.nodeId)}
-          onRetry={() => {
-            if (viewNode) retry(viewNode);
-          }}
-          onDismiss={() => dismiss(viewJob.nodeId)}
-        />
-      )}
     </div>
   );
 }

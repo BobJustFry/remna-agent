@@ -4,8 +4,10 @@ import { api, type RemnaScriptAction, type RemnaScriptRunBody, type RemnawaveVer
 import { useNodesAgents } from "../hooks/useNodesAgents";
 import { useNodesOnline } from "../hooks/useNodesOnline";
 import { useRemnawaveVersions } from "../hooks/useRemnawaveVersions";
+import { useAgentInstallQueue, type InstallJob } from "../hooks/useAgentInstallQueue";
 import { useScriptQueue } from "../hooks/useScriptQueue";
 import type { AgentMap, HostingItem, NodeItem, OnlineMap } from "../types";
+import { AgentInstallLogDialog } from "./AgentInstallLogDialog";
 import { AgentInstallTray } from "./AgentInstallTray";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { RemnaScriptDialog } from "./RemnaScriptDialog";
@@ -32,6 +34,9 @@ export type AppOutletContext = {
   openScriptRun: (nodes: NodeItem[], action: RemnaScriptAction) => void;
   openWarpInstall: (nodes: NodeItem[], force?: boolean) => void;
   openCf204Install: (nodes: NodeItem[]) => void;
+  installJobs: Record<string, InstallJob>;
+  enqueueAgentInstall: (nodes: NodeItem[], installDeps: boolean) => void;
+  openAgentInstallLog: (nodeId: string) => void;
   /** In-flight RemnaNode/WARP/cf204 jobs (queued or running, including confirm dialog). */
   scriptBusy: Record<string, { warp: boolean; remna: boolean; cf204: boolean }>;
   remnawaveVersions: RemnawaveVersions | null;
@@ -52,6 +57,7 @@ export function AppShell({ username, onLogout }: Props) {
     null,
   );
   const [viewScriptJobKey, setViewScriptJobKey] = useState<string | null>(null);
+  const [viewAgentJobId, setViewAgentJobId] = useState<string | null>(null);
   const { statuses } = useNodesOnline(true);
   const {
     statuses: agentStatuses,
@@ -65,6 +71,17 @@ export function AppShell({ username, onLogout }: Props) {
     refresh: refreshRemnawaveVersions,
   } = useRemnawaveVersions(true);
   const scriptQueue = useScriptQueue({
+    onIdle: () => {
+      void refreshAgents();
+    },
+  });
+
+  const onNodeUpdated = useCallback((updated: NodeItem) => {
+    setNodes((prev) => prev.map((n) => (n.id === updated.id ? updated : n)));
+  }, []);
+
+  const agentQueue = useAgentInstallQueue({
+    onNodeUpdated,
     onIdle: () => {
       void refreshAgents();
     },
@@ -101,7 +118,11 @@ export function AppShell({ username, onLogout }: Props) {
   const openCf204Install = useCallback((targetNodes: NodeItem[]) => {
     if (targetNodes.length === 0) return;
     scriptQueue.enqueue(targetNodes, { action: "cf204", patch_profile: true });
-  }, [scriptQueue]);
+  }, [scriptQueue.enqueue]);
+
+  const openAgentInstallLog = useCallback((nodeId: string) => {
+    setViewAgentJobId(nodeId);
+  }, []);
 
   const scriptBusy: Record<string, { warp: boolean; remna: boolean; cf204: boolean }> = {};
   const markBusy = (nodeId: string) => {
@@ -132,6 +153,9 @@ export function AppShell({ username, onLogout }: Props) {
     openScriptRun,
     openWarpInstall,
     openCf204Install,
+    installJobs: agentQueue.jobs,
+    enqueueAgentInstall: agentQueue.enqueue,
+    openAgentInstallLog,
     scriptBusy,
     remnawaveVersions,
     remnawaveLoading,
@@ -139,29 +163,50 @@ export function AppShell({ username, onLogout }: Props) {
   };
 
   const viewJob = viewScriptJobKey ? scriptQueue.jobs[viewScriptJobKey] : undefined;
+  const viewAgentJob = viewAgentJobId ? agentQueue.jobs[viewAgentJobId] : undefined;
+  const viewAgentNode = viewAgentJob
+    ? nodes.find((n) => n.id === viewAgentJob.nodeId)
+    : undefined;
 
-  const trayJobs = scriptQueue.jobList.map((j) => ({
-    nodeId: j.jobKey,
-    nodeName: `${j.nodeName} · ${j.action === "warp" ? "WARP" : j.action === "cf204" ? "cf_204" : j.action}`,
-    host: j.host,
-    sshLabel: j.sshLabel,
-    phase: j.phase,
-    lines: j.lines,
-    statusMessage: j.statusMessage,
-    reinstall: j.action === "reinstall" || (j.action === "warp" && "force" in j.body && !!j.body.force),
-    installDeps: false,
-  }));
+  const trayJobs = [
+    ...agentQueue.jobList.map((j) => ({
+      nodeId: `agent:${j.nodeId}`,
+      nodeName: `${j.nodeName} · агент`,
+      host: j.host,
+      sshLabel: j.sshLabel,
+      phase: j.phase,
+      lines: j.lines,
+      statusMessage: j.statusMessage,
+      reinstall: j.reinstall,
+      installDeps: j.installDeps,
+    })),
+    ...scriptQueue.jobList.map((j) => ({
+      nodeId: `script:${j.jobKey}`,
+      nodeName: `${j.nodeName} · ${j.action === "warp" ? "WARP" : j.action === "cf204" ? "cf_204" : j.action}`,
+      host: j.host,
+      sshLabel: j.sshLabel,
+      phase: j.phase,
+      lines: j.lines,
+      statusMessage: j.statusMessage,
+      reinstall: j.action === "reinstall" || (j.action === "warp" && "force" in j.body && !!j.body.force),
+      installDeps: false,
+    })),
+  ];
+  const trayActive = agentQueue.activeCount + scriptQueue.activeCount;
+  const trayDone = agentQueue.doneCount + scriptQueue.doneCount;
+  const trayError = agentQueue.errorCount + scriptQueue.errorCount;
+  const trayHasAgent = agentQueue.jobList.length > 0;
   const trayHasWarp = scriptQueue.jobList.some((j) => j.action === "warp");
   const trayHasCf204 = scriptQueue.jobList.some((j) => j.action === "cf204");
   const trayHasRemna = scriptQueue.jobList.some((j) => j.action !== "warp" && j.action !== "cf204");
   const trayTitle =
-    trayHasWarp && !trayHasRemna && !trayHasCf204
-      ? "WARP"
-      : trayHasCf204 && !trayHasRemna && !trayHasWarp
-        ? "Заглушка cf_204"
-        : trayHasWarp || trayHasCf204
-          ? "Задачи на нодах"
-          : "Скрипты RemnaNode";
+    trayHasAgent && !trayHasWarp && !trayHasCf204 && !trayHasRemna
+      ? "Установка агентов"
+      : trayHasWarp && !trayHasRemna && !trayHasCf204 && !trayHasAgent
+        ? "WARP"
+        : trayHasCf204 && !trayHasRemna && !trayHasWarp && !trayHasAgent
+          ? "Заглушка cf_204"
+          : "Задачи на нодах";
 
   const latestNode = remnawaveVersions?.node_version;
 
@@ -194,12 +239,20 @@ export function AppShell({ username, onLogout }: Props) {
           <AgentInstallTray
             jobs={trayJobs}
             title={trayTitle}
-            activeCount={scriptQueue.activeCount}
-            doneCount={scriptQueue.doneCount}
-            errorCount={scriptQueue.errorCount}
-            onOpen={(jobKey) => setViewScriptJobKey(jobKey)}
-            onCancel={scriptQueue.cancel}
-            onDismissFinished={scriptQueue.dismissFinished}
+            activeCount={trayActive}
+            doneCount={trayDone}
+            errorCount={trayError}
+            onOpen={(id) => {
+              if (id.startsWith("agent:")) setViewAgentJobId(id.slice("agent:".length));
+              else if (id.startsWith("script:")) setViewScriptJobKey(id.slice("script:".length));
+            }}
+            onCancel={(id) => {
+              if (id.startsWith("agent:")) agentQueue.cancel(id.slice("agent:".length));
+              else if (id.startsWith("script:")) scriptQueue.cancel(id.slice("script:".length));
+            }}
+            onDismissFinished={() => {
+              agentQueue.dismissFinished();
+            }}
           />
         )}
         <StatusBar
@@ -298,6 +351,17 @@ export function AppShell({ username, onLogout }: Props) {
           onClose={() => setViewScriptJobKey(null)}
           onCancel={() => scriptQueue.cancel(viewJob.jobKey)}
           onDismiss={() => scriptQueue.dismiss(viewJob.jobKey)}
+        />
+      )}
+      {viewAgentJob && (
+        <AgentInstallLogDialog
+          job={viewAgentJob}
+          onClose={() => setViewAgentJobId(null)}
+          onCancel={() => agentQueue.cancel(viewAgentJob.nodeId)}
+          onRetry={() => {
+            if (viewAgentNode) agentQueue.retry(viewAgentNode);
+          }}
+          onDismiss={() => agentQueue.dismiss(viewAgentJob.nodeId)}
         />
       )}
     </div>
