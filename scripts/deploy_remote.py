@@ -152,7 +152,7 @@ def main() -> int:
         ))
         time.sleep(8)
         print(sh(client, "cd /opt/remna-agent && docker compose -f docker-compose.yml -f docker-compose.prod.yml ps"))
-        print(sh(client, "cd /opt/remna-agent && docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=40 api caddy web"))
+        print(sh(client, "cd /opt/remna-agent && docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=50 api web"))
     finally:
         client.close()
 
