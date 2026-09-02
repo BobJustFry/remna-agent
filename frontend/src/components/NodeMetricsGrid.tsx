@@ -4,6 +4,7 @@ import type { AgentMap, MetricPoint, MetricsRange, NodeItem, OnlineMap, SharingU
 import { CountryFlag } from "./CountryFlag";
 import { NodeMetricLineChart } from "./NodeMetricCharts";
 import { NodeMetricSpark } from "./NodeMetricSpark";
+import { inboundPeerCount, inboundPeerFromXray } from "../lib/inboundPeerCount";
 import { pingToneClass } from "../lib/pingTone";
 import { OnlineBadge } from "./OnlineBadge";
 import { SharedBadge } from "./SharedBadge";
@@ -65,6 +66,8 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses }: Props) {
             toTs={toTs}
             status={statuses[node.id]}
             agent={agentStatuses[node.id]}
+            inboundIps={inboundPeerCount(agentStatuses[node.id], sharing, node.id)}
+            inboundFromXray={inboundPeerFromXray(agentStatuses[node.id], sharing, node.id)}
             sharingHits={sharing?.by_agent_id[node.id] ?? []}
             onOpen={() => setOpenId(node.id)}
           />
@@ -75,6 +78,8 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses }: Props) {
           node={openNode}
           status={statuses[openNode.id]}
           agent={agentStatuses[openNode.id]}
+          inboundIps={inboundPeerCount(agentStatuses[openNode.id], sharing, openNode.id)}
+          inboundFromXray={inboundPeerFromXray(agentStatuses[openNode.id], sharing, openNode.id)}
           dayPoints={series[openNode.id] ?? []}
           dayFromTs={fromTs}
           dayToTs={toTs}
@@ -92,6 +97,8 @@ function NodeTile({
   toTs,
   status,
   agent,
+  inboundIps,
+  inboundFromXray,
   sharingHits,
   onOpen,
 }: {
@@ -101,6 +108,8 @@ function NodeTile({
   toTs: number;
   status: OnlineMap[string] | undefined;
   agent: AgentMap[string] | undefined;
+  inboundIps: number | null;
+  inboundFromXray: boolean;
   sharingHits: SharingUserHit[];
   onOpen: () => void;
 }) {
@@ -129,14 +138,18 @@ function NodeTile({
       <div className="mt-0.5 grid min-h-0 flex-1 grid-rows-3 gap-0.5">
         <SparkRow
           label="вх. IP"
-          value={fmtCount(agent?.proxy_peers)}
-          valueClass={peersToneClass(agent?.proxy_peers)}
+          value={fmtCount(inboundIps)}
+          valueClass={peersToneClass(inboundIps)}
           color={PING}
           times={times}
           values={points.map((p) => p.ping_ms)}
           fromTs={fromTs}
           toTs={toTs}
-          title="Цифра — уникальные входящие IP. График — cf_204 за сутки."
+          title={
+            inboundFromXray
+              ? "Цифра — уникальные клиентские IP из Xray за 15 мин (ss не видит localhost/CDN). График — cf_204 за сутки."
+              : "Цифра — уникальные входящие IP (ss). График — cf_204 за сутки."
+          }
         />
         <SparkRow
           label="CPU"
@@ -215,6 +228,8 @@ function NodeMetricModal({
   node,
   status,
   agent,
+  inboundIps,
+  inboundFromXray,
   dayPoints,
   dayFromTs,
   dayToTs,
@@ -223,6 +238,8 @@ function NodeMetricModal({
   node: NodeItem;
   status: OnlineMap[string] | undefined;
   agent: AgentMap[string] | undefined;
+  inboundIps: number | null;
+  inboundFromXray: boolean;
   dayPoints: MetricPoint[];
   dayFromTs: number;
   dayToTs: number;
@@ -326,8 +343,13 @@ function NodeMetricModal({
           <dl className="mb-3 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] sm:grid-cols-4 lg:grid-cols-8">
             <Fact
               label="вх. IP"
-              value={fmtCount(agent?.proxy_peers)}
-              valueClass={peersToneClass(agent?.proxy_peers)}
+              value={fmtCount(inboundIps)}
+              valueClass={peersToneClass(inboundIps)}
+              title={
+                inboundFromXray
+                  ? "уникальные клиентские IP Xray за 15 мин"
+                  : "уникальные входящие TCP (ss)"
+              }
             />
             <Fact
               label="cf_204"
@@ -419,9 +441,19 @@ function ChartBlock({ title, unit, children }: { title: string; unit: string; ch
   );
 }
 
-function Fact({ label, value, valueClass }: { label: string; value: string; valueClass?: string }) {
+function Fact({
+  label,
+  value,
+  valueClass,
+  title,
+}: {
+  label: string;
+  value: string;
+  valueClass?: string;
+  title?: string;
+}) {
   return (
-    <div>
+    <div title={title}>
       <dt className="text-[var(--muted)]">{label}</dt>
       <dd className={`truncate tabular-nums ${valueClass ?? "font-medium text-[var(--text)]"}`}>{value}</dd>
     </div>

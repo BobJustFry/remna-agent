@@ -45,6 +45,7 @@ _snapshot: dict[str, Any] = {
     "online_users": 0,
     "flagged": 0,
     "by_agent_id": {},
+    "peers_by_agent_id": {},
     "thresholds": {
         "ips_5m": BAN_IPS_5M,
         "slash16_5m": BAN_SLASH16_5M,
@@ -62,6 +63,7 @@ def snapshot() -> dict[str, Any]:
             "online_users": _snapshot.get("online_users"),
             "flagged": _snapshot.get("flagged"),
             "by_agent_id": dict(_snapshot.get("by_agent_id") or {}),
+            "peers_by_agent_id": dict(_snapshot.get("peers_by_agent_id") or {}),
             "thresholds": dict(_snapshot.get("thresholds") or {}),
         }
 
@@ -91,6 +93,21 @@ def _parse_ts(val: Any) -> datetime | None:
 
 def _norm_host(s: str) -> str:
     return (s or "").strip().lower()
+
+
+def _canon_node_name(s: str) -> str:
+    n = _norm_host(s)
+    if n.startswith("usa-"):
+        return "us-" + n[4:]
+    return n
+
+
+def _is_loop_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return addr.is_loopback
 
 
 def _slash16(ip: str) -> str | None:
@@ -308,8 +325,46 @@ def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
         _flagged_stats.update({st.uid: st for st in flagged})
 
     host_to_agent: dict[str, str] = {}
-    for aid, _aname, host in agent_nodes:
+    name_to_agent: dict[str, str] = {}
+    for aid, aname, host in agent_nodes:
         host_to_agent[_norm_host(host)] = aid
+        name_to_agent[_canon_node_name(aname)] = aid
+
+    def _agent_id(addr: str, nname: str) -> str | None:
+        h = _norm_host(addr)
+        if h in host_to_agent:
+            return host_to_agent[h]
+        return name_to_agent.get(_canon_node_name(nname))
+
+    peer_ips: dict[str, set[str]] = defaultdict(set)
+    peer_users: dict[str, int] = defaultdict(int)
+    now_peers = _now()
+    for uuid, payload in node_results.items():
+        aid = _agent_id(str(payload.get("_address") or ""), str(payload.get("_nodeName") or ""))
+        if not aid:
+            continue
+        peer_ips.setdefault(aid, set())
+        n_users = 0
+        for row in payload.get("users") or []:
+            if not isinstance(row, dict):
+                continue
+            n_users += 1
+            for item in row.get("ips") or []:
+                ip = item.get("ip") if isinstance(item, dict) else item
+                if not ip:
+                    continue
+                ip = str(ip).replace("::ffff:", "")
+                if _is_loop_ip(ip):
+                    continue
+                ts = _parse_ts(item.get("lastSeen") if isinstance(item, dict) else None)
+                if ts and now_peers - ts > WIN_15:
+                    continue
+                peer_ips[aid].add(ip)
+        peer_users[aid] += n_users
+    peers_by_agent = {
+        aid: {"ips": len(ips), "users": peer_users[aid]}
+        for aid, ips in peer_ips.items()
+    }
 
     by_agent: dict[str, list[dict]] = defaultdict(list)
     for st in flagged:
@@ -318,7 +373,7 @@ def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
             ts = _parse_ts(r["lastSeen"])
             if not ts or _now() - ts > WIN_15:
                 continue
-            aid = host_to_agent.get(_norm_host(str(r.get("address") or "")))
+            aid = _agent_id(str(r.get("address") or ""), str(r.get("node") or ""))
             if not aid or aid in seen_agents:
                 continue
             seen_agents.add(aid)
@@ -345,6 +400,7 @@ def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
         "online_users": len(stats),
         "flagged": len(flagged),
         "by_agent_id": dict(by_agent),
+        "peers_by_agent_id": peers_by_agent,
         "thresholds": {
             "ips_5m": BAN_IPS_5M,
             "slash16_5m": BAN_SLASH16_5M,
@@ -353,7 +409,19 @@ def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
     }
     with _lock:
         _snapshot.update(out)
-    log.info("sharing scan: online=%s flagged=%s nodes=%s", len(stats), len(flagged), len(by_agent))
+    unmatched = [
+        str(p.get("_nodeName") or u[:8])
+        for u, p in node_results.items()
+        if not _agent_id(str(p.get("_address") or ""), str(p.get("_nodeName") or ""))
+    ]
+    log.info(
+        "sharing scan: online=%s flagged=%s share_nodes=%s peer_nodes=%s unmatched=%s",
+        len(stats),
+        len(flagged),
+        len(by_agent),
+        len(peers_by_agent),
+        unmatched[:12],
+    )
     return out
 
 

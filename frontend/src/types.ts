@@ -119,6 +119,11 @@ export type SharingUserHit = {
   rw_nodes: string[];
 };
 
+export type SharingNodePeers = {
+  ips: number;
+  users: number;
+};
+
 export type SharingStatus = {
   scanned_at: string | null;
   error: string | null;
@@ -126,6 +131,7 @@ export type SharingStatus = {
   online_users: number;
   flagged: number;
   by_agent_id: Record<string, SharingUserHit[]>;
+  peers_by_agent_id?: Record<string, SharingNodePeers>;
   thresholds: Record<string, number>;
 };
 

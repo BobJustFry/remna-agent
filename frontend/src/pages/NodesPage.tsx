@@ -19,6 +19,7 @@ import { HaproxyDialog } from "../components/HaproxyDialog";
 import { NodeForm } from "../components/NodeForm";
 import { NodeRow, type NodeListDensity } from "../components/NodeRow";
 import { useSharingStatus } from "../hooks/useSharingStatus";
+import { inboundPeerCount } from "../lib/inboundPeerCount";
 import { remnanodeNeedsUpdate, warpNeedsInstall } from "../hooks/useRemnawaveVersions";
 import type { NodeFormValues, NodeItem } from "../types";
 
@@ -714,6 +715,7 @@ export function NodesPage() {
               status={statuses[node.id]}
               agent={agentStatuses[node.id]}
               sharingHits={sharing?.by_agent_id[node.id] ?? []}
+              inboundIps={inboundPeerCount(agentStatuses[node.id], sharing, node.id)}
               selected={selectedIds.has(node.id)}
               density={density}
               onSelectChange={toggleSelect}

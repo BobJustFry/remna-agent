@@ -16,6 +16,7 @@ type Props = {
   status?: OnlineStatus;
   agent?: AgentStatus;
   sharingHits?: SharingUserHit[];
+  inboundIps?: number | null;
   selected: boolean;
   density?: NodeListDensity;
   onSelectChange: (nodeId: string, selected: boolean) => void;
@@ -47,6 +48,7 @@ export const NodeRow = memo(function NodeRow({
   status,
   agent,
   sharingHits,
+  inboundIps,
   selected,
   density = "comfortable",
   onSelectChange,
@@ -414,6 +416,7 @@ export const NodeRow = memo(function NodeRow({
     <AgentCell
       node={node}
       agent={agent}
+      inboundIps={inboundIps}
       installJob={installJob}
       compact={compact}
       onInstall={() => onInstallAgent(node)}
@@ -843,6 +846,7 @@ function VersionsCell({
 function AgentCell({
   node,
   agent,
+  inboundIps,
   installJob,
   compact,
   onInstall,
@@ -850,6 +854,7 @@ function AgentCell({
 }: {
   node: NodeItem;
   agent?: AgentStatus;
+  inboundIps?: number | null;
   installJob?: InstallJob;
   compact: boolean;
   onInstall: () => void;
@@ -964,6 +969,7 @@ function AgentCell({
     );
   }
 
+  const peers = inboundIps ?? agent.proxy_peers;
   const title = [
     agent.version ? `agent v${agent.version}` : null,
     agent.remnanode_version ? `RemnaNode v${agent.remnanode_version}` : null,
@@ -971,9 +977,7 @@ function AgentCell({
     `RAM ${fmt(agent.mem_percent)}%`,
     `Disk ${fmt(agent.disk_percent)}%`,
     agent.loadavg?.length ? `load ${agent.loadavg.map((x) => x.toFixed(2)).join(" · ")}` : null,
-    agent.proxy_peers != null
-      ? `клиенты ${agent.proxy_peers} · tcp ${agent.proxy_conns ?? "—"}`
-      : null,
+    peers != null ? `клиенты ${peers} · tcp ${agent.proxy_conns ?? "—"}` : null,
     agent.error,
   ]
     .filter(Boolean)
@@ -983,7 +987,7 @@ function AgentCell({
     return (
       <div className={`min-w-0 truncate tabular-nums text-[var(--text)] ${text}`} title={title}>
         {fmt(agent.cpu_percent)}/{fmt(agent.mem_percent)}/{fmt(agent.disk_percent)}
-        {agent.proxy_peers != null ? ` · ${agent.proxy_peers}ip` : ""}
+        {peers != null ? ` · ${peers}ip` : ""}
       </div>
     );
   }
@@ -998,9 +1002,9 @@ function AgentCell({
           load {agent.loadavg.map((x) => x.toFixed(2)).join(" · ")}
         </div>
       )}
-      {agent.proxy_peers != null && (
+      {peers != null && (
         <div className="mt-0.5 text-[10px] text-[var(--muted)]">
-          клиенты {agent.proxy_peers} · tcp {agent.proxy_conns ?? "—"}
+          клиенты {peers} · tcp {agent.proxy_conns ?? "—"}
         </div>
       )}
     </div>

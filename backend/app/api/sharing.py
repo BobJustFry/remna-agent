@@ -28,6 +28,11 @@ class SharingUserHit(BaseModel):
     rw_nodes: list[str] = []
 
 
+class SharingNodePeers(BaseModel):
+    ips: int = 0
+    users: int = 0
+
+
 class SharingStatusOut(BaseModel):
     scanned_at: str | None = None
     error: str | None = None
@@ -35,6 +40,7 @@ class SharingStatusOut(BaseModel):
     online_users: int = 0
     flagged: int = 0
     by_agent_id: dict[str, list[SharingUserHit]]
+    peers_by_agent_id: dict[str, SharingNodePeers] = {}
     thresholds: dict[str, int]
 
 
@@ -52,6 +58,7 @@ def _status_out() -> SharingStatusOut:
         online_users=int(snap.get("online_users") or 0),
         flagged=int(snap.get("flagged") or 0),
         by_agent_id=snap.get("by_agent_id") or {},
+        peers_by_agent_id=snap.get("peers_by_agent_id") or {},
         thresholds=snap.get("thresholds") or {},
     )
 
