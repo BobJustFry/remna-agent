@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
+import { Logo } from "./Logo";
 
 type Props = {
   username: string;
@@ -27,9 +28,12 @@ export function Sidebar({ username, onLogout, open, onClose }: Props) {
         ].join(" ")}
       >
         <div className="flex items-start justify-between border-b border-[var(--border)] px-5 py-5">
-          <div>
-            <div className="text-lg font-semibold tracking-tight text-[var(--text)]">Remna Agent</div>
-            <div className="mt-1 text-xs text-[var(--muted)]">Управление нодами</div>
+          <div className="flex items-center gap-2.5">
+            <Logo size={26} className="shrink-0" />
+            <div>
+              <div className="text-lg font-semibold tracking-tight text-[var(--text)]">Remna Agent</div>
+              <div className="mt-0.5 text-xs text-[var(--muted)]">Управление нодами</div>
+            </div>
           </div>
           <button
             type="button"
