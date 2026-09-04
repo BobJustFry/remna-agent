@@ -11,6 +11,7 @@ import type {
   SharingDossier,
   SharingStatus,
   SshCheckResult,
+  XrayOnlineMap,
 } from "../types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -45,18 +46,29 @@ export const api = {
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
 
   listHostings: () => request<HostingItem[]>("/api/hostings"),
-  createHosting: (payload: { name: string; website_url?: string | null; notes?: string | null }) =>
+  createHosting: (payload: {
+    name: string;
+    website_url?: string | null;
+    notes?: string | null;
+    bandwidth_mbps?: number | null;
+  }) =>
     request<HostingItem>("/api/hostings", {
       method: "POST",
       body: JSON.stringify({
         name: payload.name,
         website_url: payload.website_url ?? null,
         notes: payload.notes ?? null,
+        bandwidth_mbps: payload.bandwidth_mbps ?? null,
       }),
     }),
   updateHosting: (
     id: string,
-    payload: { name?: string; website_url?: string | null; notes?: string | null },
+    payload: {
+      name?: string;
+      website_url?: string | null;
+      notes?: string | null;
+      bandwidth_mbps?: number | null;
+    },
   ) =>
     request<HostingItem>(`/api/hostings/${id}`, {
       method: "PATCH",
@@ -90,6 +102,7 @@ export const api = {
       statuses: AgentMap;
       latest_agent_version: string;
       latest_wgcf_version: string | null;
+      xray_online: XrayOnlineMap;
     }>("/api/nodes/agents"),
   agentsStream: (opts: {
     onEvent: (event: AgentsStreamEvent) => void;
@@ -520,6 +533,7 @@ export type AgentsStreamEvent =
       type: "done";
       latest_agent_version: string;
       latest_wgcf_version: string | null;
+      xray_online: XrayOnlineMap;
     }
   | { type: "error"; message: string };
 

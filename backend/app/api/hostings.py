@@ -44,6 +44,7 @@ async def create_hosting(
         name=body.name.strip(),
         website_url=website_url,
         notes=body.notes,
+        bandwidth_mbps=body.bandwidth_mbps,
     )
     await _apply_favicon(hosting)
     db.add(hosting)
@@ -91,6 +92,8 @@ async def update_hosting(
         hosting.website_url = website_url
     if "notes" in body.model_fields_set:
         hosting.notes = body.notes
+    if "bandwidth_mbps" in body.model_fields_set:
+        hosting.bandwidth_mbps = body.bandwidth_mbps
 
     if url_changed:
         await _apply_favicon(hosting)

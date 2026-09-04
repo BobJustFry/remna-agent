@@ -22,12 +22,16 @@ class HostingCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     website_url: str | None = Field(default=None, max_length=512)
     notes: str | None = None
+    # Channel the hosting sells, Mbit/s. Null — unknown, no gauge is drawn.
+    bandwidth_mbps: int | None = Field(default=None, ge=1, le=1_000_000)
 
 
 class HostingUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     website_url: str | None = Field(default=None, max_length=512)
     notes: str | None = None
+    # Channel the hosting sells, Mbit/s. Null — unknown, no gauge is drawn.
+    bandwidth_mbps: int | None = Field(default=None, ge=1, le=1_000_000)
 
 
 class HostingOut(BaseModel):
@@ -38,6 +42,7 @@ class HostingOut(BaseModel):
     website_url: str | None
     favicon_data: str | None
     notes: str | None
+    bandwidth_mbps: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -123,6 +128,20 @@ class AgentNodeStatus(BaseModel):
     loadavg: list[float] | None = None
     cf204_ok: bool | None = None
     cf204_ms: float | None = None
+    capacity_comfort: int | None = None
+    capacity_ceiling: int | None = None
+    capacity_limiter: str | None = None
+    net_rx_bps: int | None = None
+    net_tx_bps: int | None = None
+    net_iface: str | None = None
+    net_link_mbps: int | None = None
+    # Channel limit of the node's hosting, Mbit/s — null when the hosting has none set.
+    hosting_bandwidth_mbps: int | None = None
+    # Users the Xray core reports online. Rides with the node event so it does not
+    # depend on the stream's final message arriving.
+    xray_online: int | None = None
+    # "xray" — RemnaNode on the box; "proxy" — HAProxy only; "unknown" — no agent yet.
+    kind: str = "unknown"
     error: str | None = None
 
 
@@ -130,6 +149,10 @@ class NodesAgentResponse(BaseModel):
     statuses: dict[str, AgentNodeStatus]
     latest_agent_version: str = "0.0.0"
     latest_wgcf_version: str | None = None
+    # Users the Xray core reports online, per node id. Sourced from the Remnawave
+    # panel, which reads it from the core via RemnaNode — the nodes expose no
+    # gRPC stats API of their own.
+    xray_online: dict[str, int] = Field(default_factory=dict)
 
 
 class RemnawaveVersionsOut(BaseModel):
@@ -169,6 +192,10 @@ class MetricPointOut(BaseModel):
     cpu_percent: float | None = None
     mem_percent: float | None = None
     disk_percent: float | None = None
+    net_rx_bps: int | None = None
+    net_tx_bps: int | None = None
+    users_online: float | None = None
+    capacity: int | None = None
 
 
 class NodesMetricsResponse(BaseModel):

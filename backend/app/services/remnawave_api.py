@@ -50,6 +50,32 @@ def rw_nodes() -> list[dict]:
     return out if isinstance(out, list) else []
 
 
+def rw_users_online_by_address() -> dict[str, int]:
+    """Users the Xray core reports online, keyed by node address.
+
+    The nodes run no gRPC stats API of their own, so this is the only place the
+    core's own count is available: RemnaNode reports it to the panel, and the
+    panel hands it to us. Returns {} when Remnawave is not configured or errors —
+    an unavailable panel must not blank out the whole agents view.
+    """
+    if not _configured():
+        return {}
+    try:
+        nodes = rw_nodes()
+    except RemnawaveApiError:
+        return {}
+    out: dict[str, int] = {}
+    for n in nodes:
+        addr = (n.get("address") or "").strip()
+        if not addr:
+            continue
+        try:
+            out[addr] = int(n.get("usersOnline") or 0)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def rw_node_by_name(name: str) -> dict:
     key = name.strip().lower()
     nodes = rw_nodes()

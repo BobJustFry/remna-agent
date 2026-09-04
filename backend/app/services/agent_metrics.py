@@ -46,7 +46,24 @@ class AgentStatus:
     loadavg: list[float] | None = None
     cf204_ok: bool | None = None
     cf204_ms: float | None = None
+    # How many concurrent tunnels the box carries on its current config.
+    # Agents older than 0.1.16 do not report it — stays None, UI shows "—".
+    capacity_comfort: int | None = None
+    capacity_ceiling: int | None = None
+    capacity_limiter: str | None = None
+    # Throughput on the default-route interface, bits/s. Null on agents < 0.1.17
+    # and on the very first poll after an agent restart (no delta yet).
+    net_rx_bps: int | None = None
+    net_tx_bps: int | None = None
+    net_iface: str | None = None
+    net_link_mbps: int | None = None
     error: str | None = None
+
+
+def _capacity(data: dict) -> dict:
+    """`capacity` block from /metrics; empty for agents older than 0.1.16."""
+    block = data.get("capacity")
+    return block if isinstance(block, dict) else {}
 
 
 @dataclass
@@ -193,6 +210,13 @@ async def _probe_once(
             loadavg=data.get("loadavg"),
             cf204_ok=_as_bool(data.get("cf204_ok")),
             cf204_ms=_as_float(data.get("cf204_ms")),
+            capacity_comfort=_as_int(_capacity(data).get("comfort")),
+            capacity_ceiling=_as_int(_capacity(data).get("ceiling")),
+            capacity_limiter=_as_str(_capacity(data).get("limiter")),
+            net_rx_bps=_as_int(data.get("net_rx_bps")),
+            net_tx_bps=_as_int(data.get("net_tx_bps")),
+            net_iface=_as_str(data.get("net_iface")),
+            net_link_mbps=_as_int(data.get("net_link_mbps")),
             error=None,
         )
 

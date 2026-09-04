@@ -186,10 +186,39 @@ _TOKEN_SYNC_COOLDOWN_SEC = 60.0
 _token_sync_last_try: dict[str, float] = {}
 
 
-def _status_to_schema(st: AgentStatus) -> AgentNodeStatus:
+def _node_kind(st: AgentStatus) -> str:
+    """XRAY node or plain HAProxy proxy, as the agent sees the box.
+
+    RemnaNode present wins: a box that also fronts with HAProxy is still an Xray
+    node. Without an agent we cannot tell, and say so rather than guessing.
+    """
+    if not st.present:
+        return "unknown"
+    if st.remnanode_running or st.remnanode_version:
+        return "xray"
+    if st.haproxy_present:
+        return "proxy"
+    return "unknown"
+
+
+def _status_to_schema(
+    st: AgentStatus,
+    hosting_bandwidth_mbps: int | None = None,
+    xray_online: int | None = None,
+) -> AgentNodeStatus:
     return AgentNodeStatus(
         present=st.present,
         configured=st.configured,
+        capacity_comfort=st.capacity_comfort,
+        capacity_ceiling=st.capacity_ceiling,
+        capacity_limiter=st.capacity_limiter,
+        net_rx_bps=st.net_rx_bps,
+        net_tx_bps=st.net_tx_bps,
+        net_iface=st.net_iface,
+        net_link_mbps=st.net_link_mbps,
+        hosting_bandwidth_mbps=hosting_bandwidth_mbps,
+        xray_online=xray_online,
+        kind=_node_kind(st),
         version=st.version,
         remnanode_version=st.remnanode_version,
         remnanode_running=st.remnanode_running,
@@ -218,7 +247,9 @@ def _status_to_schema(st: AgentStatus) -> AgentNodeStatus:
     )
 
 
-async def _probe_one_node(node: Node) -> tuple[str, AgentNodeStatus]:
+async def _probe_one_node(
+    node: Node, online_by_address: dict[str, int] | None = None
+) -> tuple[str, AgentNodeStatus]:
     node_id = str(node.id)
     token = decrypt_secret(node.agent_token_enc) if node.agent_token_enc else None
     st = await fetch_agent_status(
@@ -275,7 +306,9 @@ async def _probe_one_node(node: Node) -> tuple[str, AgentNodeStatus]:
                     f"Токен не совпадает; автосинхронизация по SSH не удалась: {exc}"
                 )
 
-    return node_id, _status_to_schema(st)
+    hosting_bw = node.hosting.bandwidth_mbps if node.hosting is not None else None
+    online = (online_by_address or {}).get(node.host)
+    return node_id, _status_to_schema(st, hosting_bw, online)
 
 
 @router.get("/agents", response_model=NodesAgentResponse)
@@ -283,16 +316,23 @@ async def nodes_agents(
     _: str = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> NodesAgentResponse:
-    result = await db.execute(select(Node))
+    result = await db.execute(select(Node).options(selectinload(Node.hosting)))
     nodes = list(result.scalars().all())
-    pairs = await asyncio.gather(*(_probe_one_node(n) for n in nodes))
     from app.services.agent_version import get_bundled_agent_version
+    from app.services.remnawave_api import rw_users_online_by_address
     from app.services.wgcf_releases import get_latest_wgcf_version
+
+    by_address = await asyncio.to_thread(rw_users_online_by_address)
+    pairs = await asyncio.gather(*(_probe_one_node(n, by_address) for n in nodes))
+    xray_online = {
+        str(n.id): by_address[n.host] for n in nodes if n.host in by_address
+    }
 
     return NodesAgentResponse(
         statuses=dict(pairs),
         latest_agent_version=get_bundled_agent_version(),
         latest_wgcf_version=await get_latest_wgcf_version(),
+        xray_online=xray_online,
     )
 
 
@@ -302,13 +342,16 @@ async def nodes_agents_stream(
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """Same probes as GET /agents, but emit each node as soon as it answers."""
-    result = await db.execute(select(Node))
+    result = await db.execute(select(Node).options(selectinload(Node.hosting)))
     nodes = list(result.scalars().all())
     for node in nodes:
         db.expunge(node)
 
     async def event_stream() -> AsyncIterator[bytes]:
-        tasks = [asyncio.create_task(_probe_one_node(n)) for n in nodes]
+        from app.services.remnawave_api import rw_users_online_by_address
+
+        by_address = await asyncio.to_thread(rw_users_online_by_address)
+        tasks = [asyncio.create_task(_probe_one_node(n, by_address)) for n in nodes]
         try:
             for fut in asyncio.as_completed(tasks):
                 node_id, st = await fut
@@ -332,6 +375,11 @@ async def nodes_agents_stream(
                         "type": "done",
                         "latest_agent_version": get_bundled_agent_version(),
                         "latest_wgcf_version": await get_latest_wgcf_version(),
+                        "xray_online": {
+                            str(n.id): by_address[n.host]
+                            for n in nodes
+                            if n.host in by_address
+                        },
                     },
                     ensure_ascii=False,
                 )

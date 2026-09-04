@@ -30,6 +30,23 @@ _RETENTION = timedelta(days=180)
 _MAX_POINTS = 420
 
 
+def _as_bps(value) -> int | None:
+    """Bits per second as a whole number; averages over a bucket come back as float."""
+    if value is None:
+        return None
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(value) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _round(v: float | None) -> float | None:
     if v is None:
         return None
@@ -53,6 +70,10 @@ async def insert_samples(
             cpu_percent=_round(row.get("cpu_percent")),
             mem_percent=_round(row.get("mem_percent")),
             disk_percent=_round(row.get("disk_percent")),
+            net_rx_bps=_as_bps(row.get("net_rx_bps")),
+            net_tx_bps=_as_bps(row.get("net_tx_bps")),
+            users_online=_as_int(row.get("users_online")),
+            capacity=_as_int(row.get("capacity")),
         )
         for row in rows
     ]
@@ -117,6 +138,10 @@ async def fetch_series(
         func.avg(NodeMetricSample.cpu_percent).label("cpu_percent"),
         func.avg(NodeMetricSample.mem_percent).label("mem_percent"),
         func.avg(NodeMetricSample.disk_percent).label("disk_percent"),
+        func.avg(NodeMetricSample.net_rx_bps).label("net_rx_bps"),
+        func.avg(NodeMetricSample.net_tx_bps).label("net_tx_bps"),
+        func.avg(NodeMetricSample.users_online).label("users_online"),
+        func.max(NodeMetricSample.capacity).label("capacity"),
     )
     if since is not None:
         stmt = stmt.where(NodeMetricSample.recorded_at >= since)
@@ -126,7 +151,18 @@ async def fetch_series(
 
     series: dict[str, list[dict]] = {}
     result = await db.execute(stmt)
-    for node_uuid, t_raw, ping_ms, cpu_percent, mem_percent, disk_percent in result.all():
+    for (
+        node_uuid,
+        t_raw,
+        ping_ms,
+        cpu_percent,
+        mem_percent,
+        disk_percent,
+        net_rx_bps,
+        net_tx_bps,
+        users_online,
+        capacity,
+    ) in result.all():
         if t_raw is None:
             continue
         key = str(node_uuid)
@@ -137,6 +173,10 @@ async def fetch_series(
                 "cpu_percent": _round(cpu_percent),
                 "mem_percent": _round(mem_percent),
                 "disk_percent": _round(disk_percent),
+                "net_rx_bps": _as_bps(net_rx_bps),
+                "net_tx_bps": _as_bps(net_tx_bps),
+                "users_online": _round(users_online),
+                "capacity": _as_int(capacity),
             }
         )
     return step, from_ts, to_ts, series

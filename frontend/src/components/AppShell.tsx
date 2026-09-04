@@ -6,7 +6,7 @@ import { useNodesOnline } from "../hooks/useNodesOnline";
 import { useRemnawaveVersions } from "../hooks/useRemnawaveVersions";
 import { useAgentInstallQueue, type InstallJob } from "../hooks/useAgentInstallQueue";
 import { useScriptQueue } from "../hooks/useScriptQueue";
-import type { AgentMap, HostingItem, NodeItem, OnlineMap } from "../types";
+import type { AgentMap, HostingItem, NodeItem, OnlineMap, XrayOnlineMap } from "../types";
 import { AgentInstallLogDialog } from "./AgentInstallLogDialog";
 import { AgentInstallTray } from "./AgentInstallTray";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -28,6 +28,7 @@ export type AppOutletContext = {
   reloadNodes: () => Promise<void>;
   statuses: OnlineMap;
   agentStatuses: AgentMap;
+  xrayOnline: XrayOnlineMap;
   latestAgentVersion: string | null;
   latestWgcfVersion: string | null;
   refreshAgents: () => Promise<void>;
@@ -73,6 +74,7 @@ export function AppShell({ username, onLogout }: Props) {
     statuses: agentStatuses,
     latestAgentVersion,
     latestWgcfVersion,
+    xrayOnline,
     refresh: refreshAgents,
   } = useNodesAgents(true);
   const {
@@ -161,6 +163,7 @@ export function AppShell({ username, onLogout }: Props) {
     reloadNodes,
     statuses,
     agentStatuses,
+    xrayOnline,
     latestAgentVersion,
     latestWgcfVersion,
     refreshAgents,

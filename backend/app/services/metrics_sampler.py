@@ -37,7 +37,18 @@ async def sample_once() -> int:
             )
             return str(node.id), st
 
+        # Онлайн ядра Xray приходит от панели Remnawave — один запрос на весь тик,
+        # а не по ноде. Панель может быть недоступна: тогда пишем None, а не ноль,
+        # иначе на графике появится провал, которого не было.
+        from app.services.remnawave_api import rw_users_online_by_address
+
+        online_task = asyncio.to_thread(rw_users_online_by_address)
         agent_pairs = await asyncio.gather(*(one_agent(n) for n in nodes), return_exceptions=True)
+        try:
+            by_address = await online_task
+        except Exception:
+            log.warning("xray online unavailable this tick")
+            by_address = {}
         agents: dict[str, object] = {}
         for item in agent_pairs:
             if isinstance(item, BaseException):
@@ -56,6 +67,9 @@ async def sample_once() -> int:
             present = bool(getattr(ag, "present", False)) if ag is not None else False
             cf_ok = getattr(ag, "cf204_ok", None) if ag is not None else None
             cf_ms = getattr(ag, "cf204_ms", None) if ag is not None else None
+            rx = getattr(ag, "net_rx_bps", None) if ag is not None else None
+            tx = getattr(ag, "net_tx_bps", None) if ag is not None else None
+            cap = getattr(ag, "capacity_comfort", None) if ag is not None else None
             rows.append(
                 {
                     "node_id": uuid.UUID(nid),
@@ -64,6 +78,10 @@ async def sample_once() -> int:
                     "cpu_percent": cpu if present else None,
                     "mem_percent": mem if present else None,
                     "disk_percent": disk if present else None,
+                    "net_rx_bps": rx if present else None,
+                    "net_tx_bps": tx if present else None,
+                    "users_online": by_address.get(node.host),
+                    "capacity": cap if present else None,
                 }
             )
         return await insert_samples(db, rows)

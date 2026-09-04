@@ -6,6 +6,8 @@ export type HostingItem = {
   website_url: string | null;
   favicon_data: string | null;
   notes: string | null;
+  /** Channel the hosting sells, Mbit/s. Null — unknown, no gauge is drawn. */
+  bandwidth_mbps: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -58,10 +60,30 @@ export type AgentStatus = {
   loadavg: number[] | null;
   cf204_ok: boolean | null;
   cf204_ms: number | null;
+  /** Concurrent tunnels the box carries on its current config. Null on agents < 0.1.16. */
+  capacity_comfort: number | null;
+  capacity_ceiling: number | null;
+  capacity_limiter: string | null;
+  /** Throughput on the default-route interface, bits/s. Null on agents < 0.1.17. */
+  net_rx_bps: number | null;
+  net_tx_bps: number | null;
+  net_iface: string | null;
+  net_link_mbps: number | null;
+  /** Channel limit of this node's hosting, Mbit/s. */
+  hosting_bandwidth_mbps: number | null;
+  /** Users the Xray core reports online, delivered with this node's own event. */
+  xray_online: number | null;
+  /** "xray" — RemnaNode on the box, "proxy" — HAProxy only, "unknown" — no agent. */
+  kind: NodeKind;
   error: string | null;
 };
 
+export type NodeKind = "xray" | "proxy" | "unknown";
+
 export type AgentMap = Record<string, AgentStatus>;
+
+/** Users the Xray core reports online, per node id. */
+export type XrayOnlineMap = Record<string, number>;
 
 export type NodeFormValues = {
   name: string;
@@ -93,6 +115,10 @@ export type MetricPoint = {
   cpu_percent: number | null;
   mem_percent: number | null;
   disk_percent: number | null;
+  net_rx_bps: number | null;
+  net_tx_bps: number | null;
+  users_online: number | null;
+  capacity: number | null;
 };
 
 export type NodesMetricsResponse = {
@@ -114,6 +140,9 @@ export type SharingUserHit = {
   ips_5m: number;
   ips_15m: number;
   s16_5m: number;
+  conc_ips: number;
+  conc_nets: number;
+  own_ips: number;
   ips_on_node: number;
   reasons: string[];
   rw_nodes: string[];

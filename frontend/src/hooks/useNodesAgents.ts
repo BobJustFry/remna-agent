@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { AgentMap, AgentStatus } from "../types";
+import type { AgentMap, AgentStatus, XrayOnlineMap } from "../types";
 
-const INTERVAL_MS = 10000;
+// The backend sampler already fetches /metrics from every node every 30s, so a
+// 10s poll here mostly duplicated it. Matching that cadence halves the traffic
+// without the dashboard feeling any staler.
+const INTERVAL_MS = 30000;
 /** Extra UI debounce on top of backend hysteresis. */
 const UI_OFFLINE_STREAK = 2;
 
@@ -68,6 +71,7 @@ export function useNodesAgents(enabled: boolean) {
   const [statuses, setStatuses] = useState<AgentMap>({});
   const [latestAgentVersion, setLatestAgentVersion] = useState<string | null>(null);
   const [latestWgcfVersion, setLatestWgcfVersion] = useState<string | null>(null);
+  const [xrayOnline, setXrayOnline] = useState<XrayOnlineMap>({});
   const inFlight = useRef(false);
   const failStreaks = useRef(new Map<string, number>());
   const abortRef = useRef<AbortController | null>(null);
@@ -90,6 +94,7 @@ export function useNodesAgents(enabled: boolean) {
           } else if (ev.type === "done") {
             if (ev.latest_agent_version) setLatestAgentVersion(ev.latest_agent_version);
             if (ev.latest_wgcf_version) setLatestWgcfVersion(ev.latest_wgcf_version);
+            if (ev.xray_online) setXrayOnline(ev.xray_online);
             setStatuses((prev) => {
               const out: AgentMap = {};
               for (const id of seen) {
@@ -107,6 +112,7 @@ export function useNodesAgents(enabled: boolean) {
         setStatuses((prev) => applyBatch(prev, data.statuses, failStreaks.current));
         if (data.latest_agent_version) setLatestAgentVersion(data.latest_agent_version);
         if (data.latest_wgcf_version) setLatestWgcfVersion(data.latest_wgcf_version);
+        if (data.xray_online) setXrayOnline(data.xray_online);
       } catch {
         // keep previous
       }
@@ -128,5 +134,5 @@ export function useNodesAgents(enabled: boolean) {
     };
   }, [enabled, refresh]);
 
-  return { statuses, latestAgentVersion, latestWgcfVersion, refresh };
+  return { statuses, latestAgentVersion, latestWgcfVersion, xrayOnline, refresh };
 }

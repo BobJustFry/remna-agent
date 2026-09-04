@@ -11,12 +11,14 @@ export function HostingsPage() {
   const [name, setName] = useState("");
   const [websiteUrl, setWebsiteUrl] = useState("");
   const [notes, setNotes] = useState("");
+  const [bandwidth, setBandwidth] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<HostingItem | null>(null);
   const [editName, setEditName] = useState("");
   const [editWebsiteUrl, setEditWebsiteUrl] = useState("");
   const [editNotes, setEditNotes] = useState("");
+  const [editBandwidth, setEditBandwidth] = useState("");
   const [pendingDelete, setPendingDelete] = useState<HostingItem | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
 
@@ -30,10 +32,12 @@ export function HostingsPage() {
         name: name.trim(),
         website_url: websiteUrl.trim() || null,
         notes: notes.trim() || null,
+        bandwidth_mbps: bandwidth.trim() ? Number(bandwidth.trim()) : null,
       });
       setName("");
       setWebsiteUrl("");
       setNotes("");
+      setBandwidth("");
       await reloadHostings();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ошибка");
@@ -51,6 +55,7 @@ export function HostingsPage() {
         name: editName.trim(),
         website_url: editWebsiteUrl.trim() || null,
         notes: editNotes.trim() || null,
+        bandwidth_mbps: editBandwidth.trim() ? Number(editBandwidth.trim()) : null,
       });
       setEditing(null);
       await reloadHostings();
@@ -105,7 +110,7 @@ export function HostingsPage() {
       <div className="flex-1 space-y-4 overflow-auto px-3 py-3 sm:px-6 sm:py-4">
         <form
           onSubmit={(e) => void onCreate(e)}
-          className="grid gap-3 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] p-4 md:grid-cols-[1fr_1.2fr_1fr_auto]"
+          className="grid gap-3 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] p-4 md:grid-cols-[1fr_1.2fr_1fr_11rem_auto]"
         >
           <input
             value={name}
@@ -125,6 +130,14 @@ export function HostingsPage() {
             onChange={(e) => setNotes(e.target.value)}
             placeholder="Заметка"
             className={inputCls}
+          />
+          <input
+            value={bandwidth}
+            onChange={(e) => setBandwidth(e.target.value.replace(/[^0-9]/g, ""))}
+            placeholder="Канал, Мбит/с"
+            inputMode="numeric"
+            title="Ограничение канала у хостинга, Мбит/с. Пусто — не задано, шкала не рисуется."
+            className={`${inputCls} w-full`}
           />
           <button type="submit" disabled={busy} className={btnPrimary}>
             Добавить
@@ -149,7 +162,7 @@ export function HostingsPage() {
               className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-row)] px-4 py-3"
             >
               {editing?.id === item.id ? (
-                <div className="grid gap-2 md:grid-cols-[1fr_1.2fr_1fr_auto_auto]">
+                <div className="grid gap-2 md:grid-cols-[1fr_1.2fr_1fr_11rem_auto_auto]">
                   <input value={editName} onChange={(e) => setEditName(e.target.value)} className={inputCls} />
                   <input
                     value={editWebsiteUrl}
@@ -158,6 +171,14 @@ export function HostingsPage() {
                     className={inputCls}
                   />
                   <input value={editNotes} onChange={(e) => setEditNotes(e.target.value)} className={inputCls} />
+                  <input
+                    value={editBandwidth}
+                    onChange={(e) => setEditBandwidth(e.target.value.replace(/[^0-9]/g, ""))}
+                    placeholder="Канал, Мбит/с"
+                    inputMode="numeric"
+                    title="Ограничение канала у хостинга, Мбит/с. Пусто — не задано."
+                    className={inputCls}
+                  />
                   <button type="button" disabled={busy} onClick={() => void onSaveEdit()} className={btnPrimary}>
                     Сохранить
                   </button>
@@ -183,7 +204,14 @@ export function HostingsPage() {
                         </a>
                       )}
                     </div>
-                    {item.notes && <div className="mt-1 truncate text-xs text-[var(--muted)]">{item.notes}</div>}
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+                      <span className="tabular-nums">
+                        {item.bandwidth_mbps
+                          ? `канал ${item.bandwidth_mbps} Мбит/с`
+                          : "канал не задан"}
+                      </span>
+                      {item.notes && <span className="truncate">· {item.notes}</span>}
+                    </div>
                   </div>
                   <div className="flex flex-wrap shrink-0 gap-2">
                     {item.website_url && (
@@ -215,6 +243,9 @@ export function HostingsPage() {
                         setEditName(item.name);
                         setEditWebsiteUrl(item.website_url ?? "");
                         setEditNotes(item.notes ?? "");
+                        setEditBandwidth(
+                          item.bandwidth_mbps != null ? String(item.bandwidth_mbps) : "",
+                        );
                       }}
                     >
                       Изменить

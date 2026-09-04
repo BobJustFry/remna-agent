@@ -14,6 +14,14 @@ type Props = {
   /** Unix seconds. Chart X always spans this window (e.g. last 24h). */
   xMin: number;
   xMax: number;
+  /**
+   * Dashed ceiling drawn across the plot — capacity for the online chart. The Y
+   * scale still follows the data, so a series far below the ceiling stays
+   * readable; when the ceiling would fall outside the plot it is clamped to the
+   * top edge instead of flattening the curve.
+   */
+  refY?: number;
+  refLabel?: string;
 };
 
 export function NodeMetricLineChart({
@@ -26,6 +34,8 @@ export function NodeMetricLineChart({
   height = 132,
   xMin,
   xMax,
+  refY,
+  refLabel,
 }: Props) {
   const [hover, setHover] = useState<{ i: number; x: number } | null>(null);
   const w = 640;
@@ -60,6 +70,14 @@ export function NodeMetricLineChart({
     setHover({ i: best, x: xAtT(times[best]) });
   }
 
+  // Потолок ёмкости. Если он выше данных, шкала за ним не тянется — иначе кривая
+  // из десятка человек на фоне ёмкости в сотни превратилась бы в прямую у нуля.
+  // В этом случае линию прижимаем к верхней границе и делаем бледнее.
+  const refLine =
+    refY != null && Number.isFinite(refY) && refY > 0
+      ? { y: refY > yMax ? pad.t : yAt(refY), clamped: refY > yMax }
+      : null;
+
   const path = linePath(times, values, xAtT, yAt);
   const area = areaPath(times, values, xAtT, yAt, pad.t + innerH);
 
@@ -84,6 +102,33 @@ export function NodeMetricLineChart({
             </g>
           );
         })}
+        {refLine && (
+          <g>
+            <line
+              x1={pad.l}
+              x2={w - pad.r}
+              y1={refLine.y}
+              y2={refLine.y}
+              stroke="var(--danger)"
+              strokeWidth="1"
+              strokeDasharray="4 4"
+              opacity={refLine.clamped ? 0.35 : 0.6}
+            />
+            {refLabel && (
+              <text
+                x={w - pad.r - 2}
+                y={refLine.y + (refLine.clamped ? 9 : -3)}
+                textAnchor="end"
+                fill="var(--danger)"
+                fontSize="9"
+                fontFamily="ui-monospace, monospace"
+                opacity={refLine.clamped ? 0.5 : 0.8}
+              >
+                {refLabel}
+              </text>
+            )}
+          </g>
+        )}
         {xLabels.map((t, i) => (
           <text
             key={`x-${i}`}

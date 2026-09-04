@@ -65,11 +65,9 @@ export function DashboardPage() {
     hostings,
     statuses,
     agentStatuses,
+    xrayOnline,
     latestAgentVersion,
     remnawaveVersions,
-    reloadNodes,
-    refreshAgents,
-    refreshRemnawaveVersions,
   } = useOutletContext<AppOutletContext>();
 
   const [tab, setTab] = useState<DashTab>(() => readTab());
@@ -173,26 +171,6 @@ export function DashboardPage() {
             </p>
           )}
         </div>
-        <div className="flex flex-wrap gap-2 lg:ml-auto">
-          <button
-            type="button"
-            onClick={() => {
-              void reloadNodes();
-              void refreshAgents();
-              void refreshRemnawaveVersions(true);
-              if (tab === "haproxy") void loadHaproxyFleet();
-            }}
-            className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm text-[var(--muted)] hover:text-[var(--text)]"
-          >
-            Обновить
-          </button>
-          <Link
-            to="/nodes"
-            className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-[#06221e] transition hover:brightness-110"
-          >
-            К нодам
-          </Link>
-        </div>
       </header>
 
       <div className="border-b border-[var(--border)] px-3 sm:px-6">
@@ -251,7 +229,12 @@ export function DashboardPage() {
         }
       >
         {tab === "tiles" && (
-          <NodeMetricsGrid nodes={nodes} statuses={statuses} agentStatuses={agentStatuses} />
+          <NodeMetricsGrid
+            nodes={nodes}
+            statuses={statuses}
+            agentStatuses={agentStatuses}
+            xrayOnline={xrayOnline}
+          />
         )}
 
         {tab === "overview" && (

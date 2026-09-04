@@ -2,7 +2,17 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -21,6 +31,8 @@ class Hosting(Base):
     website_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     favicon_data: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Channel the hosting sells, Mbit/s. Null — unknown, the gauge stays blank.
+    bandwidth_mbps: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -83,6 +95,13 @@ class NodeMetricSample(Base):
     cpu_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     mem_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     disk_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_rx_bps: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    net_tx_bps: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Онлайн из ядра Xray и ёмкость ноды на момент отсчёта. Ёмкость пишем рядом,
+    # а не берём текущую: она меняется при смене конфига, и старый график иначе
+    # сравнивался бы с потолком, которого тогда не было.
+    users_online: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    capacity: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     node: Mapped["Node"] = relationship(back_populates="metric_samples")
 
