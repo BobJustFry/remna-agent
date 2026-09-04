@@ -15,7 +15,7 @@ export function SharedBadge({
   if (!hits.length) return null;
   const n = hits.length;
   const title = hits
-    .map((h) => `${h.username || h.user_id}: ${h.ips_5m} IP / ${h.s16_5m} /16`)
+    .map((h) => `${h.username || h.user_id}: ${h.conc_ips} IP одновременно, ${h.conc_nets} операторов`)
     .join("\n");
   return (
     <>
@@ -121,7 +121,7 @@ function SharingDossierModal({
         <div className="border-b border-[var(--border)] px-4 py-1.5 text-[11px] text-[var(--muted)]">
           {hits.map((h) => (
             <span key={h.user_id} className="mr-3">
-              {h.username || h.user_id}: {h.ips_5m} IP / {h.s16_5m} /16
+              {h.username || h.user_id}: {h.conc_ips} IP одновременно, {h.conc_nets} оп.
             </span>
           ))}
         </div>

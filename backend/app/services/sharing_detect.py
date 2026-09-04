@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.services import asn_lookup
 from app.services.remnawave_api import RemnawaveApiError, rw_api, rw_nodes
 
 log = logging.getLogger("remna.sharing")
@@ -23,10 +24,19 @@ WIN_5 = timedelta(minutes=5)
 WIN_15 = timedelta(minutes=15)
 
 # Один человек: 1 IP, реже 2–3 (LTE+Wi‑Fi / CGNAT).
-# 8+ разных IP за 5 мин — ферма. 5+ разных /16 — не один домашний NAT.
+# 8+ разных IP за 5 мин — ферма.
 BAN_IPS_5M = 8
-BAN_SLASH16_5M = 5
 BAN_IPS_15M = 12
+
+# Операторы, а не /16. Российские провайдеры держат один пул абонентов в
+# нескольких /16 (МТС — 91.78.x и 91.79.x, Ростелеком — 85.112.x и 80.234.x),
+# поэтому счёт по маске штрафовал человека с мобильным интернетом за то, что
+# у него меняется адрес. Порог применяется к ОДНОВРЕМЕННО активным операторам.
+BAN_NETS_CONCURRENT = 5
+
+# «Одновременно» — в пределах этого окна вокруг любого наблюдения. Роуминг по
+# вышкам даёт адреса последовательно, ферма — сразу пачкой.
+CONCURRENCY_WINDOW = timedelta(seconds=60)
 
 SKIP_PREFIX = "hop-"
 
@@ -48,7 +58,7 @@ _snapshot: dict[str, Any] = {
     "peers_by_agent_id": {},
     "thresholds": {
         "ips_5m": BAN_IPS_5M,
-        "slash16_5m": BAN_SLASH16_5M,
+        "nets_concurrent": BAN_NETS_CONCURRENT,
         "ips_15m": BAN_IPS_15M,
     },
 }
@@ -195,12 +205,15 @@ def _poll_jobs(jobs: list[tuple[str, str, str]]) -> dict[str, dict]:
     return results
 
 
-def _reasons(ips_5m: int, s16_5m: int, ips_15m: int) -> list[str]:
+def _reasons(ips_5m: int, conc_nets: int, ips_15m: int) -> list[str]:
     why = []
     if ips_5m >= BAN_IPS_5M:
         why.append(f"уникальных клиентских IP за 5 мин: {ips_5m} (порог {BAN_IPS_5M})")
-    if s16_5m >= BAN_SLASH16_5M:
-        why.append(f"разных /16 за 5 мин: {s16_5m} (порог {BAN_SLASH16_5M}) — не один CGNAT")
+    if conc_nets >= BAN_NETS_CONCURRENT:
+        why.append(
+            f"операторов одновременно: {conc_nets} (порог {BAN_NETS_CONCURRENT}) — "
+            "разные сети в одну минуту, не смена адреса"
+        )
     if ips_15m >= BAN_IPS_15M:
         why.append(f"уникальных IP за 15 мин: {ips_15m} (порог {BAN_IPS_15M})")
     return why
@@ -221,7 +234,10 @@ class _UserStat:
     rows: list[dict] = field(default_factory=list)
     ips_5m: int = 0
     ips_15m: int = 0
-    s16_5m: int = 0
+    s16_5m: int = 0          # операторов за 5 мин (имя оставлено для совместимости)
+    conc_ips: int = 0        # максимум одновременных IP
+    conc_nets: int = 0       # максимум одновременных операторов
+    own_ips: int = 0         # отсеяно адресов собственных нод
     nodes: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     username: str = ""
@@ -230,7 +246,42 @@ class _UserStat:
 _flagged_stats: dict[int, _UserStat] = {}
 
 
-def _collect_stats(node_results: dict[str, dict]) -> dict[int, _UserStat]:
+
+def _networks(ips) -> set[str]:
+    """Операторы этих адресов. Падение резолва деградирует до /16, не до нуля."""
+    try:
+        return asn_lookup.networks_of(ips)
+    except Exception:  # noqa: BLE001
+        log.warning("ASN lookup failed, fallback to /16", exc_info=True)
+        return {n for n in (_slash16(ip) for ip in ips) if n}
+
+
+def _concurrency(rows: list[dict]) -> tuple[int, int]:
+    """Максимум адресов и операторов, живших в одном окне CONCURRENCY_WINDOW.
+
+    Человек, который переезжает с вышки на вышку, набирает адреса
+    последовательно — в любом окне их один-два. Ферма даёт пачку сразу.
+    """
+    stamped = []
+    for r in rows:
+        ts = _parse_ts(r["lastSeen"])
+        if ts:
+            stamped.append((r["ip"], ts))
+    if not stamped:
+        return 0, 0
+    window = CONCURRENCY_WINDOW.total_seconds()
+    best_ips = best_nets = 0
+    for _, anchor in stamped:
+        group = {ip for ip, ts in stamped if abs((ts - anchor).total_seconds()) <= window}
+        if len(group) > best_ips:
+            best_ips = len(group)
+            best_nets = max(best_nets, len(_networks(group)))
+    return best_ips, best_nets
+
+
+def _collect_stats(
+    node_results: dict[str, dict], own_ips: set[str] | None = None
+) -> dict[int, _UserStat]:
     by_user: dict[int, _UserStat] = {}
     now = _now()
     for uuid, payload in node_results.items():
@@ -258,6 +309,15 @@ def _collect_stats(node_results: dict[str, dict]) -> dict[int, _UserStat]:
                     "address": addr,
                 })
     for st in by_user.values():
+        # Адреса собственных нод — это хопы и фетчи через туннель, а не сети клиента.
+        kept = []
+        for r in st.rows:
+            if own_ips and r["ip"] in own_ips:
+                st.own_ips += 1
+                continue
+            kept.append(r)
+        st.rows = kept
+
         def fresh(delta: timedelta) -> list[dict]:
             out = []
             for r in st.rows:
@@ -269,13 +329,12 @@ def _collect_stats(node_results: dict[str, dict]) -> dict[int, _UserStat]:
         r5, r15 = fresh(WIN_5), fresh(WIN_15)
         i5 = {r["ip"] for r in r5}
         i15 = {r["ip"] for r in r15}
-        s16 = {_slash16(ip) for ip in i5}
-        s16.discard(None)
         st.ips_5m = len(i5)
         st.ips_15m = len(i15)
-        st.s16_5m = len(s16)
+        st.s16_5m = len(_networks(i5))
+        st.conc_ips, st.conc_nets = _concurrency(st.rows)
         st.nodes = sorted({r["node"] for r in st.rows})
-        st.reasons = _reasons(st.ips_5m, st.s16_5m, st.ips_15m)
+        st.reasons = _reasons(st.ips_5m, st.conc_nets, st.ips_15m)
     return by_user
 
 
@@ -308,7 +367,11 @@ def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
     for uuid, payload in node_results.items():
         payload["_address"] = addr_by_uuid.get(uuid, "")
 
-    stats = _collect_stats(node_results)
+    # Our own nodes appear as client IPs on hops and on subscription fetches made
+    # through the tunnel. They are not the subscriber's networks.
+    own_ips = {a for a in addr_by_uuid.values() if a}
+    own_ips.update(h for _, _, h in agent_nodes if h)
+    stats = _collect_stats(node_results, own_ips)
     flagged: list[_UserStat] = []
     for st in stats.values():
         if not st.reasons:
@@ -388,6 +451,9 @@ def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
                 "ips_5m": st.ips_5m,
                 "ips_15m": st.ips_15m,
                 "s16_5m": st.s16_5m,
+                "conc_ips": st.conc_ips,
+                "conc_nets": st.conc_nets,
+                "own_ips": st.own_ips,
                 "ips_on_node": len(on_node),
                 "reasons": st.reasons,
                 "rw_nodes": st.nodes,
@@ -403,7 +469,7 @@ def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
         "peers_by_agent_id": peers_by_agent,
         "thresholds": {
             "ips_5m": BAN_IPS_5M,
-            "slash16_5m": BAN_SLASH16_5M,
+            "nets_concurrent": BAN_NETS_CONCURRENT,
             "ips_15m": BAN_IPS_15M,
         },
     }
@@ -476,6 +542,9 @@ def build_dossier(user_id: int) -> str:
     ips_5m = hits[0]["ips_5m"] if hits else 0
     ips_15m = hits[0]["ips_15m"] if hits else 0
     s16_5m = hits[0]["s16_5m"] if hits else 0
+    conc_ips = hits[0].get("conc_ips", 0) if hits else 0
+    conc_nets = hits[0].get("conc_nets", 0) if hits else 0
+    own_ips = hits[0].get("own_ips", 0) if hits else 0
     rw_nodes = hits[0].get("rw_nodes") if hits else []
     with _lock:
         st = _flagged_stats.get(user_id)
@@ -499,7 +568,11 @@ def build_dossier(user_id: int) -> str:
         f"ноды: {', '.join(rw_nodes) if rw_nodes else '—'}",
         f"уникальных клиентских IP  5 мин: {ips_5m}",
         f"уникальных клиентских IP 15 мин: {ips_15m}",
-        f"разных /16 за 5 мин: {s16_5m}  (один человек обычно 1–3 сети)",
+        f"операторов за 5 мин: {s16_5m}  (один человек обычно 1–3)",
+        f"ОДНОВРЕМЕННО адресов: {conc_ips}, операторов: {conc_nets}  "
+        f"(окно {int(CONCURRENCY_WINDOW.total_seconds())} с — вот это и отличает "
+        f"шаринг от смены адреса)",
+        f"отсеяно адресов собственных нод: {own_ips}",
         f"HWID записей: {len(devices)}  лимит: {card.get('hwidDeviceLimit')}",
     ]
     for d in devices:
@@ -555,7 +628,7 @@ def build_dossier(user_id: int) -> str:
     lines.append("")
     lines.append(
         "Порог: уникальные IP Xray (вход на ноду), не TCP ss. "
-        f"Шаринг если IP за 5 мин ≥ {BAN_IPS_5M} ИЛИ /16 за 5 мин ≥ {BAN_SLASH16_5M} "
+        f"Шаринг если IP за 5 мин ≥ {BAN_IPS_5M} ИЛИ операторов одновременно ≥ {BAN_NETS_CONCURRENT} "
         f"ИЛИ IP за 15 мин ≥ {BAN_IPS_15M}."
     )
     lines.append("")

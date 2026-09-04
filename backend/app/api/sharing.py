@@ -23,6 +23,9 @@ class SharingUserHit(BaseModel):
     ips_5m: int
     ips_15m: int
     s16_5m: int
+    conc_ips: int = 0
+    conc_nets: int = 0
+    own_ips: int = 0
     ips_on_node: int = 0
     reasons: list[str] = []
     rw_nodes: list[str] = []
