@@ -822,6 +822,48 @@ configure_bbr_basic() {
     $SUDO_CMD sysctl -p >/dev/null 2>&1 || true
 }
 
+configure_fail2ban() {
+    # Nodes sit on public IPv4 with sshd on 22 and collect thousands of password
+    # guesses a day. Beyond the obvious risk, the volume fills sshd's MaxStartups
+    # queue, and it then drops a share of NEW connections at random — which is how
+    # a node ends up "sometimes reachable" over SSH for its own operators.
+    echo "→ fail2ban…"
+
+    if ! command -v fail2ban-server >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive $SUDO_CMD apt-get update -qq >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive $SUDO_CMD apt-get install -y -qq fail2ban >/dev/null 2>&1 || {
+            echo "  fail2ban поставить не удалось — пропускаю"
+            return 0
+        }
+    fi
+
+    # backend=systemd: Ubuntu 24.04 keeps auth records in the journal and ships no
+    # /var/log/auth.log, so the default file backend would watch nothing and the
+    # jail would silently never fire.
+    $SUDO_CMD tee /etc/fail2ban/jail.local > /dev/null <<'F2BEOF'
+# Managed by remnanode-install.sh
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+backend  = systemd
+
+[sshd]
+enabled  = true
+port     = ssh
+F2BEOF
+
+    $SUDO_CMD systemctl enable fail2ban >/dev/null 2>&1 || true
+    $SUDO_CMD systemctl restart fail2ban >/dev/null 2>&1 || true
+
+    if $SUDO_CMD systemctl is-active --quiet fail2ban; then
+        echo "  fail2ban активен"
+    else
+        echo "  fail2ban не поднялся — проверьте вручную"
+    fi
+}
+
 configure_conntrack_limits() {
     local sysctl_file="/etc/sysctl.d/99-remnanode-conntrack.conf"
     local modprobe_file="/etc/modprobe.d/nf_conntrack.conf"
@@ -1745,6 +1787,8 @@ fi
 apply_ipv6_choice
 
 configure_conntrack_limits
+
+configure_fail2ban
 
 if $gaming_node; then
     configure_gaming_node

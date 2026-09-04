@@ -16,9 +16,26 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "0.1.15"
+VERSION = "0.1.18"
 STARTED_AT = time.time()
 _LAST_CPU = None
+_VIRT_CACHE: tuple[str | None] | None = None
+_LAST_NET: tuple[float, int, int] | None = None  # (monotonic, rx_bytes, tx_bytes)
+_LINK_CACHE: tuple[float, int | None] | None = None
+_LINK_TTL = 300.0
+_DOCKER_CACHE: tuple[bool] | None = None
+
+# A client that connects and then vanishes used to park a handler thread forever:
+# BaseHTTPRequestHandler inherits timeout=None, so readline() on the request line
+# never returns. The panel polls every few seconds, so on a flaky link those
+# threads piled up until the box hit its systemd TasksMax — after which nothing
+# could fork any more: sshd failed key exchange and the agent accepted
+# connections only to drop them, while the already-running Xray was untouched.
+# Two guards below: every connection gets a deadline, and concurrency is capped.
+_REQUEST_TIMEOUT = 15.0
+_MAX_HANDLERS = 48
+_handlers_lock = threading.Lock()
+_handlers_active = 0
 _REMNA_VER_CACHE: tuple[float, bool, str | None] | None = None
 _REMNA_VER_TTL = 60.0
 _WARP_CACHE: tuple[float, dict] | None = None
@@ -815,6 +832,189 @@ def start_cf204_loop() -> None:
     threading.Thread(target=_cf204_loop, daemon=True, name="cf204").start()
 
 
+def cpu_cores() -> int:
+    try:
+        return max(1, os.cpu_count() or 1)
+    except Exception:
+        return 1
+
+
+def virt_kind() -> str | None:
+    """Hypervisor as systemd sees it. Cached: it cannot change while we run."""
+    global _VIRT_CACHE
+    if _VIRT_CACHE is not None:
+        return _VIRT_CACHE[0]
+    kind = None
+    try:
+        out = subprocess.check_output(
+            ["systemd-detect-virt"], stderr=subprocess.DEVNULL, timeout=4, text=True
+        ).strip()
+        if out and out != "none":
+            kind = out
+    except Exception:
+        kind = None
+    _VIRT_CACHE = (kind,)
+    return kind
+
+
+def capacity_info(
+    mem_total_mb: float | None,
+    load: list[float] | None,
+    remnanode: bool | None,
+    haproxy_present: bool | None,
+) -> dict:
+    """How many concurrent tunnels this box carries on its current config.
+
+    Same budget as the panel's SSH-based estimate (services/vps_capacity.py) so the
+    dashboard and the capacity dialog never disagree. Deliberately conservative:
+    it is a working budget, not a benchmark.
+    """
+    cores = cpu_cores()
+    ram = int(mem_total_mb or 0)
+    if ram <= 0:
+        return {"capacity": None}
+
+    docker = _has_docker()
+    reserve = 350
+    if docker:
+        reserve += 180
+    if remnanode:
+        reserve += 120
+    if haproxy_present:
+        reserve += 40
+    usable = max(0, ram - reserve)
+
+    # Concurrent Xray Reality / xHTTP tunnels: ~2.5 MB comfort, ~1.5 MB packed.
+    ram_comfort = usable * 10 // 25
+    ram_max = usable * 10 // 15
+
+    cpu_comfort = cores * 90
+    cpu_max = cores * 160
+    if (virt_kind() or "").lower() in ("openvz", "lxc", "lxc-libvirt"):
+        cpu_comfort = int(cpu_comfort * 0.7)
+        cpu_max = int(cpu_max * 0.75)
+
+    comfort = min(ram_comfort, cpu_comfort)
+    ceiling = min(ram_max, cpu_max)
+    load1 = load[0] if load else 0.0
+    if load1 and load1 > cores * 0.85:
+        comfort = int(comfort * 0.7)
+    comfort = max(0, comfort)
+    ceiling = max(comfort, ceiling)
+
+    return {
+        "capacity": {
+            "comfort": comfort,
+            "ceiling": ceiling,
+            "limiter": "RAM" if ram_comfort <= cpu_comfort else "CPU",
+            "cpu_cores": cores,
+            "ram_total_mb": ram,
+            "reserve_mb": reserve,
+            "virt": virt_kind(),
+        }
+    }
+
+
+def _has_docker() -> bool:
+    global _DOCKER_CACHE
+    if _DOCKER_CACHE is not None:
+        return _DOCKER_CACHE[0]
+    ok = _docker_out(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=4) is not None
+    _DOCKER_CACHE = (ok,)
+    return ok
+
+
+
+def _default_iface() -> str | None:
+    """Interface carrying the default route — the one the channel limit applies to."""
+    try:
+        with open("/proc/net/route", encoding="utf-8") as f:
+            next(f, None)
+            for line in f:
+                parts = line.split()
+                # destination 00000000 == default route
+                if len(parts) > 2 and parts[1] == "00000000":
+                    return parts[0]
+    except Exception:
+        pass
+    return None
+
+
+def _iface_counters(iface: str) -> tuple[int, int] | None:
+    try:
+        with open("/proc/net/dev", encoding="utf-8") as f:
+            for line in f:
+                name, _, rest = line.partition(":")
+                if name.strip() != iface:
+                    continue
+                cols = rest.split()
+                # rx_bytes is column 0, tx_bytes column 8
+                return int(cols[0]), int(cols[8])
+    except Exception:
+        pass
+    return None
+
+
+def link_speed_mbps(iface: str | None) -> int | None:
+    """What the NIC claims the link is. Often 10000 on virtio — a hint, not the tariff."""
+    global _LINK_CACHE
+    now = time.time()
+    if _LINK_CACHE and now - _LINK_CACHE[0] < _LINK_TTL:
+        return _LINK_CACHE[1]
+    speed = None
+    if iface:
+        try:
+            with open(f"/sys/class/net/{iface}/speed", encoding="utf-8") as f:
+                val = int(f.read().strip())
+            if val > 0:
+                speed = val
+        except Exception:
+            speed = None
+    _LINK_CACHE = (now, speed)
+    return speed
+
+
+def net_info() -> dict:
+    """Throughput on the default-route interface, bits per second.
+
+    Rate is a delta between two /metrics polls, so the first call after start has
+    nothing to compare against and reports null rather than a fabricated zero.
+    """
+    global _LAST_NET
+    empty = {
+        "net_iface": None, "net_rx_bps": None, "net_tx_bps": None,
+        "net_rx_bytes": None, "net_tx_bytes": None, "net_link_mbps": None,
+    }
+    iface = _default_iface()
+    if not iface:
+        return empty
+    counters = _iface_counters(iface)
+    if counters is None:
+        return empty
+    rx, tx = counters
+    now = time.monotonic()
+    prev = _LAST_NET
+    _LAST_NET = (now, rx, tx)
+
+    rx_bps = tx_bps = None
+    if prev:
+        dt = now - prev[0]
+        # Counters are 64-bit but can reset when the iface flaps; negative delta = reset.
+        if dt >= 1.0:
+            d_rx, d_tx = rx - prev[1], tx - prev[2]
+            if d_rx >= 0 and d_tx >= 0:
+                rx_bps = int(d_rx * 8 / dt)
+                tx_bps = int(d_tx * 8 / dt)
+    return {
+        "net_iface": iface,
+        "net_rx_bps": rx_bps,
+        "net_tx_bps": tx_bps,
+        "net_rx_bytes": rx,
+        "net_tx_bytes": tx,
+        "net_link_mbps": link_speed_mbps(iface),
+    }
+
+
 def collect_metrics() -> dict:
     mem_total, mem_used, mem_percent = mem_stats()
     disk_total, disk_used, disk_percent = disk_stats("/")
@@ -822,6 +1022,7 @@ def collect_metrics() -> dict:
     warp = warp_info()
     haproxy = haproxy_info()
     peers = peers_info()
+    load = loadavg()
     return {
         "version": VERSION,
         "uptime_sec": int(time.time() - STARTED_AT),
@@ -832,21 +1033,63 @@ def collect_metrics() -> dict:
         "disk_total_gb": disk_total,
         "disk_used_gb": disk_used,
         "disk_percent": disk_percent,
-        "loadavg": loadavg(),
+        "loadavg": load,
         "remnanode_running": rn_running,
         "remnanode_version": rn_version,
         **warp,
         **haproxy,
         **peers,
         **cf204_info(),
+        **net_info(),
+        **capacity_info(mem_total, load, rn_running, haproxy.get("haproxy_present")),
     }
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = f"RemnaNodeAgent/{VERSION}"
+    # Deadline for reading the request line and headers off a socket. Without it
+    # a half-open connection holds its thread for the life of the process.
+    timeout = _REQUEST_TIMEOUT
 
     def log_message(self, fmt: str, *args) -> None:  # quieter
         return
+
+    def handle(self) -> None:
+        """Serve one connection, refusing work past the concurrency cap.
+
+        Being told "busy" is far better for the panel than a silent hang, and it
+        keeps the process from starving the whole box of task slots.
+        """
+        global _handlers_active
+        with _handlers_lock:
+            if _handlers_active >= _MAX_HANDLERS:
+                over = True
+            else:
+                over = False
+                _handlers_active += 1
+        if over:
+            # Raw bytes on purpose: send_response() reads self.request_version,
+            # which only exists once a request line has been parsed — and here
+            # nothing has been read yet.
+            try:
+                body = b'{"error": "agent busy"}'
+                head = (
+                    "HTTP/1.0 503 Service Unavailable\r\n"
+                    "Content-Type: application/json\r\n"
+                    f"Content-Length: {len(body)}\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+                self.wfile.write(head + body)
+                self.wfile.flush()
+            except Exception:
+                pass
+            self.close_connection = True
+            return
+        try:
+            super().handle()
+        finally:
+            with _handlers_lock:
+                _handlers_active -= 1
 
     def _send(self, code: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -868,7 +1111,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/") or "/"
         if path == "/health":
-            self._send(200, {"ok": True, "version": VERSION})
+            self._send(200, {"ok": True, "version": VERSION, "handlers": _handlers_active})
             return
         if path == "/metrics":
             if not self._authorized():
@@ -888,6 +1131,7 @@ def main() -> None:
 
     start_cf204_loop()
     httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd.daemon_threads = True
     httpd.agent_token = token  # type: ignore[attr-defined]
     print(f"remna-node-agent {VERSION} on {host}:{port}", flush=True)
     httpd.serve_forever()

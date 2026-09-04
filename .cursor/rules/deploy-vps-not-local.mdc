@@ -1,0 +1,37 @@
+---
+description: remna-agent живёт на VPS ragent.bob4.fun — локальную docker-сборку не поднимать
+alwaysApply: true
+---
+
+# ПРОЕКТ ДАВНО ПЕРЕЕХАЛ В ИНТЕРНЕТ И ДЕПЛОИТСЯ НА ВПС
+
+Боевая панель: **https://ragent.bob4.fun/** (`193.187.92.95`), за общим Caddy, каталог `/opt/remna-agent`.
+
+## Запрещено
+
+**Не поднимать локальный docker-compose этого проекта.** Никаких `docker compose up`, `up -d`, `--build` в `P:\Projects\remna-agent` — ни «на минутку», ни «чтобы проверить», ни «чтобы посмотреть логи».
+
+Локальные контейнеры `remna-agent-db-1` / `remna-agent-api-1` / `remna-agent-web-1` не нужны вообще. Если они запущены — это ошибка, а не рабочее состояние.
+
+Локальная сборка вводит в заблуждение: она ходит в тот же боевой парк нод и в ту же Remnawave, поэтому выглядит настоящей. Настоящая не она.
+
+## Как проверять правки
+
+1. Статически: `tsc --noEmit` и `vite build` во `frontend/`, `python -m ast` / импорт модулей для `backend/` и `agent/`.
+2. Логику агента ноды — разовым прогоном во временном файле на ноде, с удалением файла после.
+3. Живьём — **только после деплоя**, на самой VPS.
+
+## Деплой
+
+```bash
+python scripts/deploy_remote.py
+```
+
+Пакует рабочее дерево, заливает на VPS, там поднимает
+`docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build`.
+
+Креды берутся из окружения, не из репозитория: `DEPLOY_HOST`, `DEPLOY_USER`,
+`DEPLOY_PASSWORD`, `DEPLOY_DOMAIN`. Существующий `/opt/remna-agent/.env` на VPS сохраняется,
+локальные `.env`, данные postgres и `docker-compose.override.yml` не уезжают.
+
+**Деплой на боевую — только по явной просьбе в чате.** Не «заодно», не «чтобы проверить».

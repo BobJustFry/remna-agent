@@ -51,14 +51,24 @@ _SKIP_REL = {
 
 
 def connect() -> paramiko.SSHClient:
+    """Key first, password only as a fallback.
+
+    DEPLOY_KEY points at a private key; with it set, no password is needed and
+    none has to be typed or stored anywhere.
+    """
     host = os.environ["DEPLOY_HOST"]
     user = os.environ.get("DEPLOY_USER", "root")
-    password = os.environ["DEPLOY_PASSWORD"]
+    key_file = os.environ.get("DEPLOY_KEY", "").strip()
+    password = os.environ.get("DEPLOY_PASSWORD") or None
+    if not key_file and not password:
+        raise SystemExit("нужен DEPLOY_KEY (путь к приватному ключу) или DEPLOY_PASSWORD")
+
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     client.connect(
         hostname=host,
         username=user,
+        key_filename=key_file or None,
         password=password,
         timeout=30,
         allow_agent=False,
@@ -197,7 +207,7 @@ fi
             "-f docker-compose.yml -f docker-compose.prod.yml up -d --build"
         )
         compose_out = sh(client, compose, timeout=900)
-    sys.stdout.buffer.write((compose_out + "\n").encode("utf-8", "replace"))
+        sys.stdout.buffer.write((compose_out + "\n").encode("utf-8", "replace"))
         print(sh(
             client,
             "docker exec bob4fun-geodat-editor-caddy-1 caddy reload --config /etc/caddy/Caddyfile",
