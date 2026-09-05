@@ -97,6 +97,18 @@ async def clear_all_samples(db: AsyncSession) -> int:
     return int(result.rowcount or 0)
 
 
+async def clear_node_samples(db: AsyncSession, node_id: uuid.UUID) -> int:
+    """Стереть накопленные отсчёты одной ноды.
+
+    Нужно, когда ноду переехали на другое железо или сменили хостинг: старые
+    точки описывают уже не тот сервер и портят и график, и средние. Саму ноду
+    и её доступы не трогаем — сбрасывается только история.
+    """
+    result = await db.execute(delete(NodeMetricSample).where(NodeMetricSample.node_id == node_id))
+    await db.commit()
+    return int(result.rowcount or 0)
+
+
 async def fetch_series(
     db: AsyncSession,
     *,

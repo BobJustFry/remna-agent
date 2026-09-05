@@ -58,7 +58,7 @@ from app.services.agent_metrics import (
 )
 from app.services.agent_token_sync import TokenSyncError, repair_agent_auth_via_ssh
 from app.services.crypto import decrypt_secret, encrypt_secret
-from app.services.metrics_store import MetricRange, fetch_series
+from app.services.metrics_store import MetricRange, clear_node_samples, fetch_series
 from app.services.ping import check_many
 from app.services.node_reboot import NodeRebootError, reboot_node_via_ssh
 from app.services.remnanode_script import (
@@ -450,6 +450,18 @@ async def node_metrics(
     await _get_node(db, node_id)
     step, from_ts, to_ts, series = await fetch_series(db, range_key=range_key, node_id=node_id)
     return NodesMetricsResponse(range=range_key, step_sec=step, from_ts=from_ts, to_ts=to_ts, series=series)
+
+
+@router.post("/{node_id}/reset-metrics")
+async def reset_node_metrics(
+    node_id: uuid.UUID,
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, int]:
+    """Стереть историю метрик одной ноды, не трогая саму ноду и доступы."""
+    await _get_node(db, node_id)
+    deleted = await clear_node_samples(db, node_id)
+    return {"deleted": deleted}
 
 
 @router.patch("/{node_id}", response_model=NodeOut)

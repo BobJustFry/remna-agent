@@ -152,6 +152,8 @@ export const api = {
     }),
   resetMetrics: () =>
     request<{ deleted: number }>("/api/settings/reset-metrics", { method: "POST" }),
+  resetNodeMetrics: (id: string) =>
+    request<{ deleted: number }>(`/api/nodes/${id}/reset-metrics`, { method: "POST" }),
   runScriptStream: (
     id: string,
     body: RemnaScriptRunBody,

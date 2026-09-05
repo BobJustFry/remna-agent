@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode 
 import { api } from "../api/client";
 import { COUNTRIES } from "../lib/countries";
 import type { HostingItem, NodeFormValues, NodeItem } from "../types";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { CountryFlag } from "./CountryFlag";
 import { HostingLogo } from "./HostingLogo";
 import { ResizableDialog } from "./ResizableDialog";
@@ -50,6 +51,9 @@ export function NodeForm({
   const [newHostingUrl, setNewHostingUrl] = useState("");
   const [hostingBusy, setHostingBusy] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetMsg, setResetMsg] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const editing = Boolean(initial);
   const editId = initial?.id ?? null;
@@ -65,6 +69,8 @@ export function NodeForm({
     setNewHostingName("");
     setNewHostingUrl("");
     setLocalError(null);
+    setResetOpen(false);
+    setResetMsg(null);
     if (initial) {
       setValues({
         name: initial.name,
@@ -375,6 +381,32 @@ export function NodeForm({
             <textarea rows={2} value={values.notes} onChange={(e) => set("notes", e.target.value)} className={inputCls} />
           </Field>
 
+          {editing && (
+            <div className="mt-1 rounded-lg border border-[rgba(240,113,120,0.3)] bg-[rgba(240,113,120,0.05)] px-3 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-[var(--text)]">Статистика ноды</p>
+                  <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--muted)]">
+                    Сотрёт всю накопленную историю: пинг, CPU, RAM, диск, канал, онлайн и доступность.
+                    Ноду, доступы и заметки не трогает. Отменить нельзя, сбор начнётся заново.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={resetBusy}
+                  onClick={() => {
+                    setResetMsg(null);
+                    setResetOpen(true);
+                  }}
+                  className="shrink-0 rounded-lg border border-[rgba(240,113,120,0.45)] px-3 py-2 text-sm text-[var(--danger)] transition hover:bg-[rgba(240,113,120,0.12)] disabled:opacity-60"
+                >
+                  Сбросить статистику
+                </button>
+              </div>
+              {resetMsg && <p className="mt-2 text-[11px] text-[var(--success)]">{resetMsg}</p>}
+            </div>
+          )}
+
           {(error || localError) && (
             <div className="rounded-md border border-[rgba(240,113,120,0.35)] bg-[rgba(240,113,120,0.08)] px-3 py-2 text-sm text-[var(--danger)]">
               {localError || error}
@@ -390,6 +422,36 @@ export function NodeForm({
             </button>
           </div>
         </form>
+        <ConfirmDialog
+          open={resetOpen}
+          danger
+          title="Сбросить статистику ноды?"
+          message={`Будет удалена вся история метрик ноды «${initial?.name ?? ""}». Ноду, доступы и заметки это не затронет. Отменить нельзя.`}
+          confirmLabel="Сбросить"
+          busy={resetBusy}
+          busyLabel="Сброс…"
+          zClass="z-[80]"
+          onCancel={() => {
+            if (!resetBusy) setResetOpen(false);
+          }}
+          onConfirm={() => {
+            if (!editId) return;
+            void (async () => {
+              setResetBusy(true);
+              setLocalError(null);
+              try {
+                const r = await api.resetNodeMetrics(editId);
+                setResetMsg(`Удалено точек: ${r.deleted}`);
+                setResetOpen(false);
+              } catch (err) {
+                setLocalError(err instanceof Error ? err.message : "Не удалось сбросить статистику");
+                setResetOpen(false);
+              } finally {
+                setResetBusy(false);
+              }
+            })();
+          }}
+        />
     </ResizableDialog>
   );
 }
