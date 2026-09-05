@@ -37,7 +37,7 @@ export function NodeMetricLineChart({
   refY,
   refLabel,
 }: Props) {
-  const [hover, setHover] = useState<{ i: number; x: number } | null>(null);
+  const [hover, setHover] = useState<{ i: number; x: number; px: number } | null>(null);
   const w = 640;
   const h = height;
   const pad = { l: 36, r: 8, t: 8, b: 20 };
@@ -54,9 +54,13 @@ export function NodeMetricLineChart({
   function onMove(e: PointerEvent<SVGRectElement>) {
     if (times.length === 0) return;
     const svg = e.currentTarget.ownerSVGElement;
-    if (!svg) return;
-    const box = svg.getBoundingClientRect();
-    const x = ((e.clientX - box.left) / box.width) * w;
+    const ctm = svg?.getScreenCTM();
+    if (!svg || !ctm) return;
+    // Курсор переводим через CTM, а не через долю ширины элемента. viewBox по
+    // умолчанию вписывается с сохранением пропорций и центрируется, поэтому на
+    // контейнере шире 640 по краям остаётся мёртвое поле: доля ширины совпадает
+    // с реальной координатой только ровно посередине, а к краям расходится.
+    const x = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse()).x;
     const t = xMin + ((x - pad.l) / innerW) * span;
     let best = 0;
     let bestD = Infinity;
@@ -67,7 +71,11 @@ export function NodeMetricLineChart({
         best = i;
       }
     });
-    setHover({ i: best, x: xAtT(times[best]) });
+    // Линия живёт в координатах viewBox, а тултип — в CSS-пикселях обёртки,
+    // поэтому выбранную точку возвращаем обратно на экран тем же CTM.
+    const sx = xAtT(times[best]);
+    const px = new DOMPoint(sx, 0).matrixTransform(ctm).x - svg.getBoundingClientRect().left;
+    setHover({ i: best, x: sx, px });
   }
 
   // Потолок ёмкости. Если он выше данных, шкала за ним не тянется — иначе кривая
@@ -171,7 +179,7 @@ export function NodeMetricLineChart({
         <div
           className="pointer-events-none absolute z-10 rounded-md border border-[var(--border)] bg-[var(--bg-elevated)] px-2 py-1.5 text-[11px]"
           style={{
-            left: `min(calc(${(hover.x / w) * 100}% + 8px), calc(100% - 140px))`,
+            left: `max(0px, min(${hover.px + 8}px, calc(100% - 140px)))`,
             top: 8,
           }}
         >
