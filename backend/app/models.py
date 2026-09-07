@@ -117,3 +117,22 @@ class AppSetting(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+
+class ApiToken(Base):
+    """Персональный токен доступа к API панели.
+
+    Хранится только SHA-256 от токена: утечка базы не даёт готовых ключей.
+    ``prefix`` — первые символы токена, чтобы человек узнал его в списке.
+    """
+
+    __tablename__ = "api_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

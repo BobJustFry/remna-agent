@@ -152,6 +152,14 @@ export const api = {
     }),
   resetMetrics: () =>
     request<{ deleted: number }>("/api/settings/reset-metrics", { method: "POST" }),
+  listApiTokens: () => request<ApiToken[]>("/api/settings/api-tokens"),
+  createApiToken: (name: string) =>
+    request<ApiTokenCreated>("/api/settings/api-tokens", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  revokeApiToken: (id: string) =>
+    request<void>(`/api/settings/api-tokens/${id}`, { method: "DELETE" }),
   resetNodeMetrics: (id: string) =>
     request<{ deleted: number }>(`/api/nodes/${id}/reset-metrics`, { method: "POST" }),
   runScriptStream: (
@@ -431,6 +439,17 @@ export type AppSettings = {
   remna_secret_key: string;
   defaults: RemnaScriptDefaults;
 };
+
+export type ApiToken = {
+  id: string;
+  name: string;
+  prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+};
+
+// Полный токен приходит только в ответе на создание.
+export type ApiTokenCreated = ApiToken & { token: string };
 
 export type RemnaScriptRunBody = {
   action: RemnaScriptAction;

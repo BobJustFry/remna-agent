@@ -1,12 +1,21 @@
 import json
+import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
-from app.deps import require_user
+from app.deps import require_session_user, require_user
 from app.models import AppSetting
-from app.schemas import AppSettingsOut, AppSettingsUpdate, RemnaScriptDefaults
+from app.schemas import (
+    ApiTokenCreate,
+    ApiTokenCreated,
+    ApiTokenOut,
+    AppSettingsOut,
+    AppSettingsUpdate,
+    RemnaScriptDefaults,
+)
+from app.services import api_tokens
 from app.services.crypto import decrypt_secret, encrypt_secret
 from app.services.metrics_store import clear_all_samples
 
@@ -89,3 +98,43 @@ async def reset_metrics(
 ) -> dict[str, int]:
     deleted = await clear_all_samples(db)
     return {"deleted": deleted}
+
+
+# --- API-токены -------------------------------------------------------------
+# Управление только из браузерной сессии: токен не должен плодить токены.
+
+
+@router.get("/api-tokens", response_model=list[ApiTokenOut])
+async def list_api_tokens(
+    _: str = Depends(require_session_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ApiTokenOut]:
+    rows = await api_tokens.list_tokens(db)
+    return [ApiTokenOut.model_validate(r) for r in rows]
+
+
+@router.post("/api-tokens", response_model=ApiTokenCreated, status_code=status.HTTP_201_CREATED)
+async def create_api_token(
+    body: ApiTokenCreate,
+    _: str = Depends(require_session_user),
+    db: AsyncSession = Depends(get_db),
+) -> ApiTokenCreated:
+    row, token = await api_tokens.create_token(db, body.name)
+    return ApiTokenCreated(
+        id=row.id,
+        name=row.name,
+        prefix=row.prefix,
+        created_at=row.created_at,
+        last_used_at=row.last_used_at,
+        token=token,
+    )
+
+
+@router.delete("/api-tokens/{token_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_api_token(
+    token_id: uuid.UUID,
+    _: str = Depends(require_session_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    if not await api_tokens.revoke_token(db, token_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Токен не найден")
