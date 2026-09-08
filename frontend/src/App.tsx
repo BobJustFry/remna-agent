@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { api } from "./api/client";
 import { AppShell } from "./components/AppShell";
+import { AutomationPage } from "./pages/AutomationPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { HostingsPage } from "./pages/HostingsPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -63,6 +64,7 @@ export default function App() {
           <Route index element={<DashboardPage />} />
           <Route path="nodes" element={<NodesPage />} />
           <Route path="scripts" element={<ScriptsPage />} />
+          <Route path="automation" element={<AutomationPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="hostings" element={<HostingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />

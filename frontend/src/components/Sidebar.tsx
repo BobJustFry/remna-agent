@@ -62,6 +62,9 @@ export function Sidebar({ username, onLogout, open, onClose }: Props) {
             <NavItem to="/scripts" onNavigate={onClose}>
               Скрипты
             </NavItem>
+            <NavItem to="/automation" onNavigate={onClose}>
+              Автоматизация
+            </NavItem>
             <NavItem to="/settings" onNavigate={onClose}>
               Настройки
             </NavItem>

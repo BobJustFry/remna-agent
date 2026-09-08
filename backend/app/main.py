@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from app.api import auth, hostings, nodes, remnawave, settings as settings_api, sharing
+from app.api import audit, auth, hostings, nodes, remnawave, settings as settings_api, sharing
 from app.config import assert_secure_settings, settings
 from app.services.metrics_sampler import run_metrics_sampler
 from app.services.sharing_scanner import run_sharing_scanner
@@ -61,6 +61,7 @@ app.include_router(nodes.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 app.include_router(remnawave.router, prefix="/api")
 app.include_router(sharing.router, prefix="/api")
+app.include_router(audit.router, prefix="/api")
 
 
 @app.get("/api/health")

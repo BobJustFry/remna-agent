@@ -152,6 +152,15 @@ export const api = {
     }),
   resetMetrics: () =>
     request<{ deleted: number }>("/api/settings/reset-metrics", { method: "POST" }),
+  auditChecks: () => request<AuditStatus>("/api/audit/checks"),
+  auditRun: (id: string) =>
+    request<AuditStatus>(`/api/audit/checks/${id}/run`, { method: "POST" }),
+  auditUpdateSettings: (payload: { cert_domains: string[] }) =>
+    request<{ cert_domains: string[] }>("/api/audit/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
   listApiTokens: () => request<ApiToken[]>("/api/settings/api-tokens"),
   createApiToken: (name: string) =>
     request<ApiTokenCreated>("/api/settings/api-tokens", {
@@ -438,6 +447,39 @@ export type RemnaScriptDefaults = {
 export type AppSettings = {
   remna_secret_key: string;
   defaults: RemnaScriptDefaults;
+};
+
+export type AuditFinding = {
+  severity: "crit" | "warn" | "info";
+  target: string;
+  title: string;
+  detail: string;
+};
+
+export type AuditResult = {
+  ran_at: string | null;
+  duration_ms: number;
+  error: string | null;
+  checked: number;
+  crit: number;
+  warn: number;
+  findings: AuditFinding[];
+};
+
+export type AuditCheck = {
+  id: string;
+  title: string;
+  what: string;
+  why: string;
+  running: boolean;
+  result: AuditResult | null;
+};
+
+export type AuditStatus = {
+  checks: AuditCheck[];
+  any_running: boolean;
+  scheduler_enabled: boolean;
+  cert_domains: string[];
 };
 
 export type ApiToken = {

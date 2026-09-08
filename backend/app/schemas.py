@@ -242,6 +242,48 @@ class AppSettingsUpdate(BaseModel):
     defaults: RemnaScriptDefaults | None = None
 
 
+class AuditFindingOut(BaseModel):
+    severity: str
+    target: str
+    title: str
+    detail: str = ""
+
+
+class AuditResultOut(BaseModel):
+    ran_at: str | None = None
+    duration_ms: int = 0
+    error: str | None = None
+    checked: int = 0
+    crit: int = 0
+    warn: int = 0
+    findings: list[AuditFindingOut] = Field(default_factory=list)
+
+
+class AuditCheckOut(BaseModel):
+    id: str
+    title: str
+    what: str
+    why: str
+    running: bool = False
+    result: AuditResultOut | None = None
+
+
+class AuditStatusOut(BaseModel):
+    checks: list[AuditCheckOut] = Field(default_factory=list)
+    any_running: bool = False
+    # Фоновое расписание пока не заведено — раздел работает только по кнопке.
+    scheduler_enabled: bool = False
+    cert_domains: list[str] = Field(default_factory=list)
+
+
+class AuditSettingsOut(BaseModel):
+    cert_domains: list[str] = Field(default_factory=list)
+
+
+class AuditSettingsUpdate(BaseModel):
+    cert_domains: list[str] | None = Field(default=None, max_length=64)
+
+
 class ApiTokenCreate(BaseModel):
     name: str = Field(min_length=1, max_length=64)
 
