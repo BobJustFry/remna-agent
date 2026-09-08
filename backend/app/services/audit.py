@@ -323,12 +323,29 @@ def check_config_drift() -> CheckResult:
         first = server_names[0] if server_names else None
 
         # Хвост от смены dest: Host-заголовок xhttp остался от прежнего домена.
+        # Само по себе это НЕ поломка. Сервер xhttp сверяет Host с настройкой
+        # инбаунда (splithttp/hub.go: IsValidHTTPHost), а панель отдаёт клиенту
+        # тот же самый Host из записи хоста — обе стороны согласованы, туннель
+        # работает. Внутрь REALITY-шифрования этот заголовок никто снаружи не
+        # видит, так что и отпечатка не создаёт. Чинить такое на живом парке
+        # опасно: править надо инбаунд и хост разом, а клиент со старой
+        # подпиской после этого получит отказ, пока не обновится.
         xh = (stream.get("xhttpSettings") or {}).get("host")
+        host_host = (h.get("host") or "").strip()
         if xh and first and xh != first:
+            agreed = not host_host or host_host == xh
             res.findings.append(Finding(
-                "warn", remark, "Host у xhttp не совпадает с SNI инбаунда",
-                f"xhttpSettings.host = {xh}, а serverNames[0] = {first}. "
-                "Обычно это забытый хвост после смены dest."))
+                "info" if agreed else "crit", remark,
+                "Host у xhttp остался от прежнего dest" if agreed
+                else "Host у хоста и у инбаунда разошлись",
+                f"xhttpSettings.host = {xh}, serverNames[0] = {first}"
+                + (f", у хоста host = {host_host}" if host_host else "")
+                + (". Клиент и сервер согласованы, туннель работает — это след "
+                   "прежней смены dest. Менять только вместе с записью хоста и "
+                   "с оглядкой на тех, кто не обновил подписку."
+                   if agreed else
+                   ". Сервер сверяет Host и отвергнет запрос — хост не работает."),
+            ))
 
         # Явный sni у хоста перекрывает профиль — после смены dest клиенты уедут на старое имя.
         h_sni = (h.get("sni") or "").strip()

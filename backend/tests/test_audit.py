@@ -66,10 +66,21 @@ class ConfigDriftTests(unittest.TestCase):
         with mock.patch.object(audit, "_panel", return_value=(hosts, profiles, [])):
             return audit.check_config_drift()
 
-    def test_finds_stale_xhttp_host(self) -> None:
-        res = self._run([_host("H", "u1")], [_profile("P", "TAG", "u1", REALITY)])
-        titles = [f.title for f in res.findings]
-        self.assertIn("Host у xhttp не совпадает с SNI инбаунда", titles)
+    def test_stale_xhttp_host_is_only_information(self) -> None:
+        """Клиент и сервер согласованы — это след прежней смены dest, не поломка."""
+        res = self._run([_host("H", "u1", host="old.example.com")],
+                        [_profile("P", "TAG", "u1", REALITY)])
+        hit = [f for f in res.findings if "Host у xhttp остался" in f.title]
+        self.assertEqual(len(hit), 1)
+        self.assertEqual(hit[0].severity, "info")
+
+    def test_host_and_inbound_disagreeing_is_critical(self) -> None:
+        """А вот когда панель отдаёт один Host, а сервер ждёт другой — хост мёртв."""
+        res = self._run([_host("H", "u1", host="third.example.com")],
+                        [_profile("P", "TAG", "u1", REALITY)])
+        hit = [f for f in res.findings if "разошлись" in f.title]
+        self.assertEqual(len(hit), 1)
+        self.assertEqual(hit[0].severity, "crit")
 
     def test_host_sni_overriding_profile_is_critical(self) -> None:
         res = self._run([_host("H", "u1", sni="old.example.com")],
