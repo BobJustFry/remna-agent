@@ -189,5 +189,28 @@ class PanelPermissionTests(unittest.TestCase):
         self.assertIn("500", ctx.exception.message)
 
 
+class PinnedEdgeTests(unittest.TestCase):
+    """Выдача CDN геозависима: не попасть в неё — ещё не поломка."""
+
+    HOSTS = [{"remark": "DE", "address": "185.141.224.48", "port": 443,
+              "isDisabled": False, "sni": "abc.a.trbcdn.net", "inbound": None}]
+
+    def _run(self, reachable):
+        with mock.patch.object(audit, "_panel", return_value=(self.HOSTS, [], [])),                 mock.patch.object(audit, "_resolve", return_value=["151.236.110.232"]),                 mock.patch.object(audit, "_tls_reachable", return_value=reachable):
+            return audit.check_cdn_alive()
+
+    def test_live_edge_out_of_the_pool_is_only_information(self) -> None:
+        res = self._run(True)
+        hit = [f for f in res.findings if "отвечает, но резолвер" in f.title]
+        self.assertEqual(len(hit), 1)
+        self.assertEqual(hit[0].severity, "info")
+
+    def test_dead_edge_out_of_the_pool_is_critical(self) -> None:
+        res = self._run(False)
+        hit = [f for f in res.findings if "не отвечает" in f.title]
+        self.assertEqual(len(hit), 1)
+        self.assertEqual(hit[0].severity, "crit")
+
+
 if __name__ == "__main__":
     unittest.main()

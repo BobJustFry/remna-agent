@@ -156,6 +156,19 @@ def _resolve(name: str) -> list[str]:
     return sorted({i[4][0] for i in infos})
 
 
+def _tls_reachable(ip: str, port: int, server_name: str) -> bool:
+    """Встаёт ли TLS с этим узлом. Ответ важнее того, что о нём думает резолвер."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((ip, port), timeout=NET_TIMEOUT) as sock:
+            with ctx.wrap_socket(sock, server_hostname=server_name):
+                return True
+    except (OSError, ssl.SSLError):
+        return False
+
+
 @dataclass
 class CertInfo:
     days_left: int
@@ -242,12 +255,24 @@ def check_cdn_alive() -> CheckResult:
         if not addr or addr in PLACEHOLDER_ADDRS or not addr.replace(".", "").isdigit():
             continue
         live = _resolve(sni)
-        if live and addr not in live:
+        if not live or addr in live:
+            continue
+        # Пул у CDN геозависимый: резолвер отвечает по своему местоположению и часто
+        # отдаёт один ближний узел. Отсутствие адреса в выдаче само по себе ничего
+        # не значит — судим по тому, отвечает ли эдж, а не по мнению резолвера.
+        port = int(h.get("port") or 443)
+        if _tls_reachable(addr, port, sni):
             res.findings.append(Finding(
-                "warn", h.get("remark") or "?",
-                f"Запинённый эдж {addr} больше не в пуле {sni}",
-                "Узлы CDN ротируются. Адрес остался на старом эдже, а домен уже отдаёт "
-                f"другие: {', '.join(live[:4])}. Стоит перемерить и сменить IP."))
+                "info", h.get("remark") or "?",
+                f"Запинённый эдж {addr} отвечает, но резолвер отдаёт другой",
+                f"Отсюда {sni} резолвится в {', '.join(live[:4])}. Это нормально: "
+                "выдача зависит от местоположения спрашивающего. Эдж жив, менять нечего."))
+        else:
+            res.findings.append(Finding(
+                "crit", h.get("remark") or "?",
+                f"Запинённый эдж {addr} не отвечает и вышел из пула {sni}",
+                f"TLS с ним не встаёт, а домен отдаёт другие узлы: {', '.join(live[:4])}. "
+                "Клиенты на этом хосте упираются в мёртвый адрес — перемерить и сменить IP."))
     res.ran_at = _now()
     return res
 
