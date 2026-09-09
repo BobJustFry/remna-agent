@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useOutletContext } from "react-router-dom";
 import { api, type ApiToken } from "../api/client";
+import { SubwatchSettings } from "../components/SubwatchSettings";
 import type { AppOutletContext } from "../components/AppShell";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CopyButton } from "../components/CopyButton";
@@ -135,6 +136,8 @@ export function SettingsPage() {
                 />
               </Field>
             </section>
+
+            <SubwatchSettings />
 
             <section className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] p-4">
               <h2 className="text-sm font-semibold">API-токены</h2>

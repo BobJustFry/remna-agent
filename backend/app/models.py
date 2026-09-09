@@ -136,3 +136,25 @@ class ApiToken(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SubCheck(Base):
+    """Одна попытка забрать подписку так, как её забирает клиент.
+
+    Пишем и удачи тоже: без них не видно, с какого момента лежит и сколько
+    длилась прошлая авария. Строки чистятся по возрасту, история короткая.
+    """
+
+    __tablename__ = "sub_checks"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+    via: Mapped[str] = mapped_column(String(16), nullable=False)   # cdn | origin
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    hosts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cert_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)

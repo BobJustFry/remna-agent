@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { Outlet, useLocation } from "react-router-dom";
-import { api, type RemnaScriptAction, type RemnaScriptRunBody, type RemnawaveVersions } from "../api/client";
+import {
+  api,
+  type RemnaScriptAction,
+  type RemnaScriptRunBody,
+  type RemnawaveVersions,
+  type SubwatchStatus,
+} from "../api/client";
 import { useNodesAgents } from "../hooks/useNodesAgents";
 import { useNodesOnline } from "../hooks/useNodesOnline";
 import { useRemnawaveVersions } from "../hooks/useRemnawaveVersions";
+import { useSubwatch } from "../hooks/useSubwatch";
 import { useAgentInstallQueue, type InstallJob } from "../hooks/useAgentInstallQueue";
 import { useScriptQueue } from "../hooks/useScriptQueue";
 import type { AgentMap, HostingItem, NodeItem, OnlineMap, XrayOnlineMap } from "../types";
@@ -14,6 +21,7 @@ import { RemnaScriptDialog } from "./RemnaScriptDialog";
 import { ScriptJobLogDialog } from "./ScriptJobLogDialog";
 import { Sidebar } from "./Sidebar";
 import { StatusBar } from "./StatusBar";
+import { SubAlertBar } from "./SubAlertBar";
 
 type Props = {
   username: string;
@@ -43,6 +51,8 @@ export type AppOutletContext = {
   remnawaveVersions: RemnawaveVersions | null;
   remnawaveLoading: boolean;
   refreshRemnawaveVersions: (force?: boolean) => Promise<RemnawaveVersions | void>;
+  subwatch: SubwatchStatus | null;
+  refreshSubwatch: () => Promise<SubwatchStatus | null>;
 };
 
 const PAGE_TITLES: Record<string, string> = {
@@ -51,6 +61,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/hostings": "Хостинги",
   "/scripts": "Скрипты",
   "/settings": "Настройки",
+  "/automation": "Автоматизация",
 };
 
 export function AppShell({ username, onLogout }: Props) {
@@ -82,6 +93,7 @@ export function AppShell({ username, onLogout }: Props) {
     loading: remnawaveLoading,
     refresh: refreshRemnawaveVersions,
   } = useRemnawaveVersions(true);
+  const { status: subwatchStatus, refresh: refreshSubwatch } = useSubwatch(true);
   const scriptQueue = useScriptQueue({
     onIdle: () => {
       void refreshAgents();
@@ -177,6 +189,8 @@ export function AppShell({ username, onLogout }: Props) {
     remnawaveVersions,
     remnawaveLoading,
     refreshRemnawaveVersions,
+    subwatch: subwatchStatus,
+    refreshSubwatch,
   };
 
   const viewJob = viewScriptJobKey ? scriptQueue.jobs[viewScriptJobKey] : undefined;
@@ -250,6 +264,7 @@ export function AppShell({ username, onLogout }: Props) {
             <div className="truncate text-[10px] text-[var(--muted)]">Remna Agent</div>
           </div>
         </div>
+        <SubAlertBar status={subwatchStatus} />
         <div className="min-h-0 flex-1 overflow-hidden">
           <Outlet context={ctx} />
         </div>
@@ -274,6 +289,7 @@ export function AppShell({ username, onLogout }: Props) {
           />
         )}
         <StatusBar
+          subwatch={subwatchStatus}
           nodes={nodes}
           statuses={statuses}
           remnawaveVersions={remnawaveVersions}

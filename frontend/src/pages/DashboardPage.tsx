@@ -7,6 +7,7 @@ import { HostingLogo } from "../components/HostingLogo";
 import { formatBytes, HaproxyStatsView } from "../components/HaproxyStatsView";
 import { NodeMetricsGrid } from "../components/NodeMetricsGrid";
 import { OnlineBadge } from "../components/OnlineBadge";
+import { SubStatusCard } from "../components/SubStatusCard";
 import { agentNeedsUpdate, remnanodeNeedsUpdate } from "../hooks/useRemnawaveVersions";
 import { countryName } from "../lib/countries";
 import type { AgentStatus, NodeItem, OnlineStatus } from "../types";
@@ -68,6 +69,8 @@ export function DashboardPage() {
     xrayOnline,
     latestAgentVersion,
     remnawaveVersions,
+    subwatch,
+    refreshSubwatch,
   } = useOutletContext<AppOutletContext>();
 
   const [tab, setTab] = useState<DashTab>(() => readTab());
@@ -170,6 +173,9 @@ export function DashboardPage() {
               Сводка по нодам, агентам и RemnaNode.
             </p>
           )}
+        </div>
+        <div className="min-w-0 sm:max-w-2xl sm:flex-1">
+          <SubStatusCard status={subwatch} onRefreshed={() => void refreshSubwatch()} />
         </div>
       </header>
 

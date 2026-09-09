@@ -488,3 +488,56 @@ class VpsCapacityOut(BaseModel):
     summary: str = ""
     notes: list[str] = Field(default_factory=list)
     error: str | None = None
+
+
+class SubProbeOut(BaseModel):
+    ok: bool
+    via: str
+    http_status: int | None = None
+    duration_ms: int = 0
+    hosts: int | None = None
+    cert_days: int | None = None
+    error: str | None = None
+
+
+class SubCheckOut(BaseModel):
+    checked_at: datetime
+    via: str
+    ok: bool
+    http_status: int | None = None
+    duration_ms: int = 0
+    hosts: int | None = None
+    cert_days: int | None = None
+    error: str | None = None
+
+
+class SubwatchConfigOut(BaseModel):
+    enabled: bool = False
+    interval_min: int = 15
+    url: str = ""
+    origin_url: str = ""
+    min_hosts: int = 3
+    notify: bool = True
+    chat_id: str = ""
+    bot_token_set: bool = False
+
+
+class SubwatchConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    interval_min: int | None = Field(default=None, ge=1, le=1440)
+    url: str | None = None
+    origin_url: str | None = None
+    min_hosts: int | None = Field(default=None, ge=1, le=1000)
+    notify: bool | None = None
+    chat_id: str | None = None
+    bot_token: str | None = None      # пустая строка стирает токен
+
+
+class SubwatchStatusOut(BaseModel):
+    config: SubwatchConfigOut
+    ok: bool | None = None
+    since: datetime | None = None
+    fails: int = 0
+    last: SubCheckOut | None = None
+    history: list[SubCheckOut] = Field(default_factory=list)
+    uptime_24h: float | None = None

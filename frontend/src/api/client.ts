@@ -161,6 +161,16 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  subwatchStatus: () => request<SubwatchStatus>("/api/subwatch/status"),
+  subwatchCheck: () => request<SubwatchStatus>("/api/subwatch/check", { method: "POST" }),
+  subwatchUpdate: (payload: SubwatchUpdate) =>
+    request<SubwatchStatus>("/api/subwatch/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  subwatchTelegramTest: () =>
+    request<{ sent: boolean }>("/api/subwatch/telegram/test", { method: "POST" }),
+
   listApiTokens: () => request<ApiToken[]>("/api/settings/api-tokens"),
   createApiToken: (name: string) =>
     request<ApiTokenCreated>("/api/settings/api-tokens", {
@@ -727,3 +737,39 @@ function toPayload(values: NodeFormValues, creating: boolean) {
 
   return payload;
 }
+
+export type SubCheck = {
+  checked_at: string;
+  via: string;
+  ok: boolean;
+  http_status: number | null;
+  duration_ms: number;
+  hosts: number | null;
+  cert_days: number | null;
+  error: string | null;
+};
+
+export type SubwatchConfig = {
+  enabled: boolean;
+  interval_min: number;
+  url: string;
+  origin_url: string;
+  min_hosts: number;
+  notify: boolean;
+  chat_id: string;
+  bot_token_set: boolean;
+};
+
+export type SubwatchStatus = {
+  config: SubwatchConfig;
+  ok: boolean | null;
+  since: string | null;
+  fails: number;
+  last: SubCheck | null;
+  history: SubCheck[];
+  uptime_24h: number | null;
+};
+
+export type SubwatchUpdate = Partial<
+  Omit<SubwatchConfig, "bot_token_set"> & { bot_token: string }
+>;

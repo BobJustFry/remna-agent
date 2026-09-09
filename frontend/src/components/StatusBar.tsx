@@ -1,8 +1,9 @@
-import type { RemnawaveVersions } from "../api/client";
+import type { RemnawaveVersions, SubwatchStatus } from "../api/client";
 import type { NodeItem, OnlineMap } from "../types";
 
 type Props = {
   nodes: NodeItem[];
+  subwatch?: SubwatchStatus | null;
   statuses: OnlineMap;
   remnawaveVersions?: RemnawaveVersions | null;
   remnawaveLoading?: boolean;
@@ -11,6 +12,7 @@ type Props = {
 
 export function StatusBar({
   nodes,
+  subwatch,
   statuses,
   remnawaveVersions,
   remnawaveLoading,
@@ -43,6 +45,18 @@ export function StatusBar({
         Offline: <span className="font-semibold">{offline}</span>
       </span>
       {pending > 0 && <span>Проверка…: {pending}</span>}
+      {subwatch?.config.enabled && subwatch.ok !== null && (
+        <span
+          className={subwatch.ok ? "text-[var(--success)]" : "text-[var(--danger)]"}
+          title={
+            subwatch.last?.error ??
+            `${subwatch.last?.hosts ?? 0} конфигов за ${subwatch.last?.duration_ms ?? 0} мс`
+          }
+        >
+          Подписка:{" "}
+          <span className="font-semibold">{subwatch.ok ? "отдаётся" : "ЛЕЖИТ"}</span>
+        </span>
+      )}
 
       {(remnawaveVersions || remnawaveLoading) && (
         <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1 sm:ml-auto">
