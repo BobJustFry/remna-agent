@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type AuditCheck, type AuditFinding, type AuditStatus } from "../api/client";
+import { PanelBackupCard } from "../components/PanelBackupCard";
 
 const SEV_ORDER: Record<string, number> = { crit: 0, warn: 1, info: 2 };
 
@@ -141,6 +142,8 @@ export function AutomationPage() {
               </Badge>
             </div>
           )}
+
+          <PanelBackupCard />
 
           {(status?.checks ?? []).map((c) => (
             <CheckCard key={c.id} check={c} onRun={() => void runOne(c.id)} />

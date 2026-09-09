@@ -26,6 +26,8 @@ services:
       WGCF_CACHE_DIR: /var/cache/remna-wgcf
     volumes:
       - ./data/wgcf:/var/cache/remna-wgcf
+      # Бэкапы панели. Каталог не входит в выкладку и переживает пересборку.
+      - ./data/backups:/var/lib/remna-backups
     depends_on:
       db:
         condition: service_healthy

@@ -541,3 +541,45 @@ class SubwatchStatusOut(BaseModel):
     last: SubCheckOut | None = None
     history: list[SubCheckOut] = Field(default_factory=list)
     uptime_24h: float | None = None
+
+
+class BackupFileOut(BaseModel):
+    name: str
+    size: int
+    created: datetime
+
+
+class PanelBackupConfigOut(BaseModel):
+    enabled: bool = False
+    interval_hours: int = 6
+    host: str = ""
+    port: int = 22
+    user: str = "root"
+    keep_recent: int = 28
+    keep_daily: int = 30
+    notify: bool = True
+    ssh_key_set: bool = False
+
+
+class PanelBackupConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    interval_hours: int | None = Field(default=None, ge=1, le=168)
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    user: str | None = None
+    keep_recent: int | None = Field(default=None, ge=1, le=500)
+    keep_daily: int | None = Field(default=None, ge=0, le=365)
+    notify: bool | None = None
+    ssh_key: str | None = None       # пустая строка стирает ключ
+
+
+class PanelBackupStatusOut(BaseModel):
+    config: PanelBackupConfigOut
+    last_run_at: datetime | None = None
+    last_ok_at: datetime | None = None
+    last_error: str | None = None
+    last_size: int | None = None
+    last_duration_ms: int | None = None
+    files: list[BackupFileOut] = Field(default_factory=list)
+    total_bytes: int = 0
+    disk_free_bytes: int | None = None

@@ -171,6 +171,15 @@ export const api = {
   subwatchTelegramTest: () =>
     request<{ sent: boolean }>("/api/subwatch/telegram/test", { method: "POST" }),
 
+  panelBackupStatus: () => request<PanelBackupStatus>("/api/panel-backup/status"),
+  panelBackupRun: () => request<PanelBackupStatus>("/api/panel-backup/run", { method: "POST" }),
+  panelBackupUpdate: (payload: PanelBackupUpdate) =>
+    request<PanelBackupStatus>("/api/panel-backup/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  panelBackupFileUrl: (name: string) => `/api/panel-backup/files/${encodeURIComponent(name)}`,
+
   listApiTokens: () => request<ApiToken[]>("/api/settings/api-tokens"),
   createApiToken: (name: string) =>
     request<ApiTokenCreated>("/api/settings/api-tokens", {
@@ -772,4 +781,38 @@ export type SubwatchStatus = {
 
 export type SubwatchUpdate = Partial<
   Omit<SubwatchConfig, "bot_token_set"> & { bot_token: string }
+>;
+
+export type BackupFile = {
+  name: string;
+  size: number;
+  created: string;
+};
+
+export type PanelBackupConfig = {
+  enabled: boolean;
+  interval_hours: number;
+  host: string;
+  port: number;
+  user: string;
+  keep_recent: number;
+  keep_daily: number;
+  notify: boolean;
+  ssh_key_set: boolean;
+};
+
+export type PanelBackupStatus = {
+  config: PanelBackupConfig;
+  last_run_at: string | null;
+  last_ok_at: string | null;
+  last_error: string | null;
+  last_size: number | null;
+  last_duration_ms: number | null;
+  files: BackupFile[];
+  total_bytes: number;
+  disk_free_bytes: number | null;
+};
+
+export type PanelBackupUpdate = Partial<
+  Omit<PanelBackupConfig, "ssh_key_set"> & { ssh_key: string }
 >;
