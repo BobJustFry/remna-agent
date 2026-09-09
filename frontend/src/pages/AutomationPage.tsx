@@ -223,7 +223,7 @@ function CheckCard({ check, onRun }: { check: AuditCheck; onRun: () => void }) {
       )}
 
       {clean && (
-        <p className="mt-3 text-sm text-[var(--ok)]">Ничего не найдено — всё в порядке.</p>
+        <p className="mt-3 text-sm text-[var(--success)]">Ничего не найдено — всё в порядке.</p>
       )}
 
       {findings.length > 0 && (
@@ -260,9 +260,9 @@ function Badge({ tone, children }: { tone: "crit" | "warn" | "ok" | "muted"; chi
     tone === "crit"
       ? "border-[rgba(240,113,120,0.45)] text-[var(--danger)]"
       : tone === "warn"
-        ? "border-[rgba(251,191,36,0.45)] text-[var(--warn)]"
+        ? "border-[rgba(251,191,36,0.45)] text-[var(--warning)]"
         : tone === "ok"
-          ? "border-[rgba(52,211,153,0.45)] text-[var(--ok)]"
+          ? "border-[rgba(52,211,153,0.45)] text-[var(--success)]"
           : "border-[var(--border)] text-[var(--muted)]";
   return <span className={`rounded-full border px-3 py-1 text-xs ${cls}`}>{children}</span>;
 }
