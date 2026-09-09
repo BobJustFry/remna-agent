@@ -92,10 +92,30 @@ def _unwrap(payload) -> list:
     return []
 
 
-def _panel() -> tuple[list, list, list]:
-    """Хосты, профили и ноды одним заходом — чтобы проверки не дёргали панель по разу."""
+# Ключу панели права выдаются по разделам: на ноды и хосты может быть доступ,
+# а на конфиг-профили — нет. Тогда часть проверок работать всё равно должна.
+NO_PROFILES_HINT = (
+    "Ключ панели в .env рагента не имеет доступа к конфиг-профилям (панель отвечает 403). "
+    "Выдайте этому ключу право на Config Profiles в Remnawave — или пропишите ключ, "
+    "у которого оно уже есть. Проверки по хостам и CDN работают и без него."
+)
+
+
+def _panel(profiles_required: bool = True) -> tuple[list, list, list]:
+    """Хосты, профили и ноды одним заходом — чтобы проверки не дёргали панель по разу.
+
+    Профили лежат за отдельным правом. Проверке, которой они не нужны, отказ в них
+    мешать не должен, поэтому запрашивать их обязательно она не просит.
+    """
     hosts = _unwrap(rw_api("/api/hosts"))
-    profiles = _unwrap(rw_api("/api/config-profiles"))
+    try:
+        profiles = _unwrap(rw_api("/api/config-profiles"))
+    except RemnawaveApiError as exc:
+        if "403" not in str(exc.message):
+            raise
+        if profiles_required:
+            raise RemnawaveApiError(NO_PROFILES_HINT) from exc
+        profiles = []
     nodes = _unwrap(rw_api("/api/nodes"))
     return hosts, profiles, nodes
 
@@ -181,7 +201,7 @@ def _cert_info(host: str, port: int, server_name: str) -> CertInfo | None:
 def check_cdn_alive() -> CheckResult:
     """Живы ли CDN-фронты, за которыми стоят хосты."""
     res = CheckResult()
-    hosts, _profiles, _ = _panel()
+    hosts, _profiles, _ = _panel(profiles_required=False)   # профили этой проверке не нужны
 
     targets: list[tuple[str, str]] = []   # (домен, к какому хосту относится)
     seen: set[tuple[str, str]] = set()

@@ -152,5 +152,42 @@ class RunTests(unittest.TestCase):
         self.assertIn("ZeroDivisionError", res.error)
 
 
+class PanelPermissionTests(unittest.TestCase):
+    """Право на конфиг-профили может быть не выдано — раздел не должен от этого умирать."""
+
+    def _rw(self, forbid_profiles=True):
+        def call(path, *a, **kw):
+            if path == "/api/config-profiles" and forbid_profiles:
+                raise audit.RemnawaveApiError('Remnawave API 403: {"message":"Forbidden resource"}')
+            return []
+        return call
+
+    def test_profiles_optional_when_check_does_not_need_them(self) -> None:
+        with mock.patch.object(audit, "rw_api", side_effect=self._rw()):
+            hosts, profiles, nodes = audit._panel(profiles_required=False)
+        self.assertEqual(profiles, [])
+
+    def test_required_profiles_give_an_actionable_message(self) -> None:
+        with mock.patch.object(audit, "rw_api", side_effect=self._rw()):
+            with self.assertRaises(audit.RemnawaveApiError) as ctx:
+                audit._panel()
+        self.assertIn("Config Profiles", ctx.exception.message)
+
+    def test_cdn_check_survives_missing_profiles(self) -> None:
+        with mock.patch.object(audit, "rw_api", side_effect=self._rw()):
+            res = audit.run("cdn_alive")
+        self.assertIsNone(res.error)
+
+    def test_other_errors_are_not_swallowed(self) -> None:
+        def call(path, *a, **kw):
+            if path == "/api/config-profiles":
+                raise audit.RemnawaveApiError("Remnawave API 500: oops")
+            return []
+        with mock.patch.object(audit, "rw_api", side_effect=call):
+            with self.assertRaises(audit.RemnawaveApiError) as ctx:
+                audit._panel(profiles_required=False)
+        self.assertIn("500", ctx.exception.message)
+
+
 if __name__ == "__main__":
     unittest.main()
