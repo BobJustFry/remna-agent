@@ -453,6 +453,7 @@ export type RemnaScriptDefaults = {
   additional_ports: string;
   mtu_ddos: boolean;
   gaming: boolean;
+  shaper: boolean;
   swap: boolean;
   swap_size: string;
   cache_size: string;
@@ -519,6 +520,7 @@ export type RemnaScriptRunBody = {
   additional_ports?: string;
   mtu_ddos?: boolean;
   gaming?: boolean;
+  shaper?: boolean;
   swap?: boolean;
   swap_size?: string;
   cache_size?: string;
@@ -530,6 +532,7 @@ export type RemnaScriptRunBody = {
   tune_swap?: "on" | "off" | "skip";
   tune_ports?: boolean;
   tune_ipv6?: "disable" | "enable" | "skip";
+  tune_shaper?: "on" | "off" | "skip";
   skip_system_update?: boolean;
   cf_204_stub?: boolean;
 };

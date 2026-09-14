@@ -6,6 +6,7 @@ const emptyDefaults: RemnaScriptDefaults = {
   additional_ports: "",
   mtu_ddos: true,
   gaming: true,
+  shaper: true,
   swap: true,
   swap_size: "1G",
   cache_size: "1G",
@@ -118,6 +119,11 @@ export function ScriptsPage() {
                 checked={defaults.gaming}
                 onChange={(v) => setDefaults((d) => ({ ...d, gaming: v }))}
                 label="Gaming tuning"
+              />
+              <Toggle
+                checked={defaults.shaper}
+                onChange={(v) => setDefaults((d) => ({ ...d, shaper: v }))}
+                label="Установка шейпера на 90% канала"
               />
               <Toggle
                 checked={defaults.swap}

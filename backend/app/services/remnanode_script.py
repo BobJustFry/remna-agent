@@ -51,6 +51,8 @@ class RemnaScriptParams:
     tune_ipv6: str = "skip"  # disable|enable|skip
     skip_system_update: bool = True
     cf_204_stub: bool = False
+    shaper: bool = True
+    tune_shaper: str = "skip"  # on|off|skip
 
 
 def scripts_dir() -> Path:
@@ -91,6 +93,8 @@ def _env_exports(params: RemnaScriptParams) -> str:
         "TUNE_PORTS": b(params.tune_ports),
         "TUNE_IPV6": params.tune_ipv6,
         "SKIP_SYSTEM_UPDATE": b(params.skip_system_update),
+        "SHAPER": b(params.shaper),
+        "TUNE_SHAPER": params.tune_shaper,
     }
     parts: list[str] = []
     for key, value in pairs.items():

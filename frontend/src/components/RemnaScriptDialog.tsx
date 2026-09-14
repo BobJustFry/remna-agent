@@ -16,6 +16,7 @@ const fallbackDefaults: RemnaScriptRunBody = {
   additional_ports: "",
   mtu_ddos: true,
   gaming: true,
+  shaper: true,
   swap: true,
   swap_size: "1G",
   cache_size: "1G",
@@ -24,6 +25,7 @@ const fallbackDefaults: RemnaScriptRunBody = {
   origin_domain: "",
   tune_mtu: "skip",
   tune_gaming: "skip",
+  tune_shaper: "skip",
   tune_swap: "skip",
   tune_ports: false,
   tune_ipv6: "skip",
@@ -54,6 +56,7 @@ export function RemnaScriptDialog({ nodes, action, onClose, onConfirm }: Props) 
           additional_ports: d.additional_ports ?? "",
           mtu_ddos: d.mtu_ddos,
           gaming: d.gaming,
+          shaper: d.shaper,
           swap: d.swap,
           swap_size: d.swap_size,
           cache_size: d.cache_size,
@@ -174,6 +177,11 @@ export function RemnaScriptDialog({ nodes, action, onClose, onConfirm }: Props) 
               </div>
               <Toggle checked={!!form.mtu_ddos} onChange={(v) => setForm((f) => ({ ...f, mtu_ddos: v }))} label="MTU 1450 (DDoS)" />
               <Toggle checked={!!form.gaming} onChange={(v) => setForm((f) => ({ ...f, gaming: v }))} label="Gaming tuning" />
+              <Toggle
+                checked={!!form.shaper}
+                onChange={(v) => setForm((f) => ({ ...f, shaper: v }))}
+                label="Установка шейпера на 90% канала"
+              />
               <Toggle checked={!!form.swap} onChange={(v) => setForm((f) => ({ ...f, swap: v }))} label="Swap" />
               <Toggle checked={!!form.disable_ipv6} onChange={(v) => setForm((f) => ({ ...f, disable_ipv6: v }))} label="Отключить IPv6" />
               <Toggle checked={!!form.use_origin} onChange={(v) => setForm((f) => ({ ...f, use_origin: v }))} label="Origin домен" />
@@ -224,6 +232,19 @@ export function RemnaScriptDialog({ nodes, action, onClose, onConfirm }: Props) 
                   <option value="skip">Не менять</option>
                   <option value="on">Включить</option>
                   <option value="off">Выключить</option>
+                </select>
+              </Field>
+              <Field label="Шейпер (90% канала)">
+                <select
+                  value={form.tune_shaper}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, tune_shaper: e.target.value as RemnaScriptRunBody["tune_shaper"] }))
+                  }
+                  className={inputCls}
+                >
+                  <option value="skip">Не менять</option>
+                  <option value="on">Замерить и поставить</option>
+                  <option value="off">Снять</option>
                 </select>
               </Field>
               <Field label="Swap">

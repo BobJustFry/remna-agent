@@ -831,6 +831,8 @@ async def run_node_script(
         tune_ipv6=body.tune_ipv6,
         skip_system_update=body.skip_system_update,
         cf_204_stub=body.cf_204_stub,
+        shaper=body.shaper,
+        tune_shaper=body.tune_shaper,
     )
 
     async def event_stream() -> AsyncIterator[bytes]:

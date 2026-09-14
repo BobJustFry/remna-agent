@@ -229,6 +229,7 @@ class RemnaScriptDefaults(BaseModel):
     origin_domain: str | None = Field(default=None, max_length=255)
     skip_system_update: bool = True
     cf_204_stub: bool = False
+    shaper: bool = True
 
 
 class AppSettingsOut(BaseModel):
@@ -321,8 +322,10 @@ class RemnaScriptRunRequest(BaseModel):
     tune_swap: Literal["on", "off", "skip"] = "skip"
     tune_ports: bool = False
     tune_ipv6: Literal["disable", "enable", "skip"] = "skip"
+    tune_shaper: Literal["on", "off", "skip"] = "skip"
     skip_system_update: bool = True
     cf_204_stub: bool = False
+    shaper: bool = True
 
 
 class ProbeStubInstallRequest(BaseModel):

@@ -41,6 +41,7 @@ install_mode="1"
 clean_install=false
 reconfigure_only=false
 gaming_node=false
+shaper_enabled=true
 swap_configured=false
 mtu_configured=false
 mtu_default_restored=false
@@ -146,6 +147,8 @@ case "$lang" in
     MSG_SWAP_CONFIG="Configuring swap..."
     MSG_SWAP_DONE="Swap configured successfully."
     MSG_GAMING_CONFIRM="Install gaming node tuning (low latency: BBR+, CAKE, MSS clamp, THP off)? (y/n)"
+    MSG_SHAPER_CONFIRM="Install queue shaper at 90% of the link (keeps latency low when the link is full)? (y/n)"
+    MSG_SKIP_SHAPER="Skipping the queue shaper."
     MSG_GAMING_SKIP="Skipping gaming node tuning. Basic BBR will be used."
     MSG_GAMING_CONFIG="Configuring gaming node tuning..."
     MSG_GAMING_DONE="Gaming node tuning configured successfully."
@@ -277,6 +280,8 @@ case "$lang" in
     MSG_SWAP_CONFIG="Настраиваем swap..."
     MSG_SWAP_DONE="Swap успешно настроен."
     MSG_GAMING_CONFIRM="Установить игровую ноду (низкий пинг: BBR+, CAKE, MSS-clamp, THP off)? (y/n)"
+    MSG_SHAPER_CONFIRM="Установить шейпер на 90% канала (держит задержку низкой, когда канал забит)? (y/n)"
+    MSG_SKIP_SHAPER="Шейпер очереди не ставим."
     MSG_GAMING_SKIP="Пропускаем тюнинг игровой ноды. Будет использован базовый BBR."
     MSG_GAMING_CONFIG="Настраиваем тюнинг игровой ноды..."
     MSG_GAMING_DONE="Тюнинг игровой ноды успешно применён."
@@ -828,6 +833,118 @@ configure_bbr_basic() {
 # на длинных плечах, а slow-start-after-idle роняет её после каждой паузы.
 # Файл 99-remnanode-tuning.conf применяется ПОСЛЕ 99-remnanode-gaming.conf
 # (алфавит), значения совпадают — конфликта нет.
+# Шейпер очереди на 90% канала.
+#
+# Зачем: когда нода упирается в свой канал, очередь копится не у нас, а в
+# коммутаторе хостера, где мы ей не управляем — задержка разъезжается, и клиент
+# видит это как «скорость есть, а видео буферит». Если поставить cake чуть ниже
+# реальной полосы, очередь переезжает к нам и остаётся короткой.
+#
+# Полосу НЕ угадываем: берём заявленную скорость порта, а если драйвер её не
+# отдаёт (virtio почти всегда пишет -1) — меряем несколькими потоками сразу.
+# Один поток упирается в маршрут до зеркала, а не в наш канал, и занижает ответ
+# в разы: на живой ноде одиночная загрузка показала 72 Мбит там, где нода
+# реально отдаёт 763.
+measure_link_mbit() {
+    local tmp i total=0 v
+    tmp=$(mktemp -d)
+    for i in 1 2 3 4; do
+        (curl -sk -o /dev/null -w '%{speed_download}' --max-time 8 \
+            https://cachefly.cachefly.net/100mb.test > "$tmp/$i" 2>/dev/null) &
+    done
+    wait
+    for i in 1 2 3 4; do
+        v=$(cat "$tmp/$i" 2>/dev/null)
+        v=${v%%.*}
+        [ -n "$v" ] && total=$((total + v))
+    done
+    rm -rf "$tmp"
+    echo $((total * 8 / 1000000))
+}
+
+configure_shaper() {
+    local iface port measured ceiling rate unit="/etc/systemd/system/remnanode-shaper.service"
+
+    echo "→ Шейпер очереди (90% канала)…"
+    if ! iface=$(detect_primary_iface); then
+        echo "  интерфейс не найден — пропускаю"
+        return 0
+    fi
+
+    port=$(cat "/sys/class/net/$iface/speed" 2>/dev/null || echo -1)
+    case "$port" in ''|*[!0-9-]*) port=-1 ;; esac
+
+    echo "  меряю канал…"
+    measured=$(measure_link_mbit)
+
+    ceiling=0
+    [ "$measured" -gt 0 ] 2>/dev/null && ceiling=$measured
+    if [ "$port" -gt 0 ] 2>/dev/null; then
+        # порт — верхняя граница: быстрее него нода не отдаст при всём желании
+        [ "$ceiling" -eq 0 ] && ceiling=$port
+        [ "$ceiling" -gt "$port" ] && ceiling=$port
+    fi
+
+    if [ "$ceiling" -lt 1 ]; then
+        echo "  замерить не удалось и порт не известен — шейпер НЕ ставлю"
+        return 0
+    fi
+
+    rate=$((ceiling * 90 / 100))
+    [ "$rate" -lt 100 ] && rate=100
+
+    $SUDO_CMD modprobe sch_cake 2>/dev/null || true
+    if ! $SUDO_CMD tc qdisc replace dev "$iface" root cake bandwidth "${rate}mbit" 2>/dev/null; then
+        echo "  cake недоступен в ядре — шейпер НЕ поставлен"
+        return 0
+    fi
+
+    # Чтобы пережило перезагрузку. Если стоит игровой профиль, он ставит очередь
+    # своим юнитом — дописываем полосу туда, иначе после ребута он вернёт
+    # безлимит и настройка молча пропадёт.
+    local gaming_unit="/etc/systemd/system/remnanode-gaming-qos.service"
+    if [ -f "$gaming_unit" ]; then
+        $SUDO_CMD sed -i "s|root cake.*|root cake bandwidth ${rate}mbit|" "$gaming_unit"
+    else
+        $SUDO_CMD tee "$unit" > /dev/null <<UNIT
+[Unit]
+Description=RemnaNode queue shaper (cake at 90% of link)
+After=network-pre.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/tc qdisc replace dev $iface root cake bandwidth ${rate}mbit
+RemainAfterExit=yes
+TimeoutStartSec=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+        $SUDO_CMD systemctl enable remnanode-shaper.service >/dev/null 2>&1 || true
+    fi
+    $SUDO_CMD systemctl daemon-reload >/dev/null 2>&1 || true
+
+    echo "  замер ${measured} Мбит, порт ${port} Мбит → cake ${rate} Мбит"
+    echo "✓ Шейпер"
+}
+
+disable_shaper() {
+    local iface
+    echo "→ Снимаю шейпер…"
+    iface=$(detect_primary_iface) || return 0
+    $SUDO_CMD tc qdisc change dev "$iface" root cake unlimited 2>/dev/null \
+        || $SUDO_CMD tc qdisc replace dev "$iface" root cake unlimited 2>/dev/null || true
+    if [ -f /etc/systemd/system/remnanode-shaper.service ]; then
+        $SUDO_CMD systemctl disable remnanode-shaper.service >/dev/null 2>&1 || true
+        $SUDO_CMD rm -f /etc/systemd/system/remnanode-shaper.service
+    fi
+    local gaming_unit="/etc/systemd/system/remnanode-gaming-qos.service"
+    [ -f "$gaming_unit" ] && $SUDO_CMD sed -i "s|root cake.*|root cake|" "$gaming_unit"
+    $SUDO_CMD systemctl daemon-reload >/dev/null 2>&1 || true
+    echo "✓ Шейпер снят"
+}
+
 configure_base_tuning() {
   local sysctl_file="/etc/sysctl.d/99-remnanode-tuning.conf"
   echo "→ Базовая оптимизация ядра…"
@@ -1384,7 +1501,14 @@ run_repair_host_mode() {
     configure_log_limits 0
 
     prompt_configure_gaming
+    prompt_configure_shaper
     prompt_configure_ipv6
+
+    if $shaper_enabled; then
+        configure_shaper
+    else
+        disable_shaper
+    fi
 
     if $gaming_node; then
         configure_gaming_node
@@ -1400,6 +1524,20 @@ run_repair_host_mode() {
 
     print_repair_checklist
     echo "$MSG_REPAIR_DONE"
+}
+
+prompt_configure_shaper() {
+    echo "$MSG_SHAPER_CONFIRM"
+    read -r response
+    case "$response" in
+    [nN])
+        echo "$MSG_SKIP_SHAPER"
+        shaper_enabled=false
+    ;;
+    *)
+        shaper_enabled=true
+    ;;
+    esac
 }
 
 prompt_configure_gaming() {
@@ -1757,6 +1895,8 @@ esac
 
 prompt_configure_gaming
 
+prompt_configure_shaper
+
 prompt_configure_ipv6
 
 echo "$MSG_NODE_PORT"
@@ -1919,6 +2059,12 @@ configure_conntrack_limits
 configure_base_tuning
 
 configure_log_limits 1
+
+if $shaper_enabled; then
+    configure_shaper
+else
+    echo "$MSG_SKIP_SHAPER"
+fi
 
 configure_fail2ban
 
