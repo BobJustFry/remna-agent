@@ -3,10 +3,36 @@
 from __future__ import annotations
 
 import json
+import re
+import socket
+import time
 import urllib.error
 import urllib.request
 
 from app.config import settings
+
+_IPV4 = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+_dns_cache: dict[str, tuple[float, str]] = {}
+_DNS_TTL = 600.0
+
+
+def _resolve(host: str) -> str:
+    """A-запись хоста, с кэшем. Пустая строка, если не резолвится.
+
+    Резолвим редко и кэшируем: функция зовётся на каждый тик сэмплера, а список
+    доменов почти не меняется. Ошибку DNS считаем нормой — узел просто не получит
+    второго ключа.
+    """
+    now = time.monotonic()
+    hit = _dns_cache.get(host)
+    if hit and now - hit[0] < _DNS_TTL:
+        return hit[1]
+    try:
+        ip = socket.gethostbyname(host)
+    except OSError:
+        ip = ""
+    _dns_cache[host] = (now, ip)
+    return ip
 
 
 class RemnawaveApiError(Exception):
@@ -70,9 +96,18 @@ def rw_users_online_by_address() -> dict[str, int]:
         if not addr:
             continue
         try:
-            out[addr] = int(n.get("usersOnline") or 0)
+            users = int(n.get("usersOnline") or 0)
         except (TypeError, ValueError):
             continue
+        out[addr] = users
+        # Ноды за CDN панель адресует origin-доменом, а у нас та же машина
+        # записана по IP (рагент ходит к ней по SSH, и завязывать его на
+        # CDN-домен нельзя). Без второго ключа такая нода выглядит в карточке
+        # как «нет данных», хотя онлайн у панели есть.
+        if not _IPV4.match(addr):
+            ip = _resolve(addr)
+            if ip:
+                out.setdefault(ip, users)
     return out
 
 
