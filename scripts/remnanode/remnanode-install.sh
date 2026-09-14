@@ -822,6 +822,131 @@ configure_bbr_basic() {
     $SUDO_CMD sysctl -p >/dev/null 2>&1 || true
 }
 
+# Обязательная базовая оптимизация — применяется на ЛЮБОЙ ноде, независимо от
+# gaming-режима. Раньше эти ключи жили только в "игровом" профиле, из-за чего
+# половина парка работала на дефолтах ядра: мелкие TCP-буферы режут скорость
+# на длинных плечах, а slow-start-after-idle роняет её после каждой паузы.
+# Файл 99-remnanode-tuning.conf применяется ПОСЛЕ 99-remnanode-gaming.conf
+# (алфавит), значения совпадают — конфликта нет.
+configure_base_tuning() {
+  local sysctl_file="/etc/sysctl.d/99-remnanode-tuning.conf"
+  echo "→ Базовая оптимизация ядра…"
+  $SUDO_CMD modprobe tcp_bbr 2>/dev/null || true
+  echo tcp_bbr | $SUDO_CMD tee /etc/modules-load.d/bbr.conf > /dev/null 2>&1 || true
+  $SUDO_CMD tee "$sysctl_file" > /dev/null <<'EOF'
+# Managed by remna-agent: базовая оптимизация ноды (не трогать руками)
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+# скорость не падает после пауз в трафике
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_no_metrics_save = 1
+# ищем реальный MTU сами — важно за фронтами и туннелями
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_notsent_lowat = 16384
+# автотюнинг буферов: это то, что реально видит VLESS/Reality/XHTTP
+net.ipv4.tcp_rmem = 4096 1048576 16777216
+net.ipv4.tcp_wmem = 4096 1048576 16777216
+# потолки для приложений, которые просят буфер сами (QUIC/UDP)
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+# очереди и порты: сотни одновременных сессий на ноду
+net.core.netdev_max_backlog = 16384
+net.core.somaxconn = 8192
+net.ipv4.ip_local_port_range = 10240 65535
+EOF
+  $SUDO_CMD sysctl -p "$sysctl_file" >/dev/null 2>&1 || true
+  echo "✓ Базовая оптимизация ядра"
+}
+
+# Логи на нодах — реальная причина забитых дисков: journald по умолчанию ест
+# до 10% раздела, nginx-заглушка пишет строку на каждый коннект REALITY,
+# а btmp растёт от переборов ssh. Аргумент: 1 — можно перезапустить docker
+# (установка/переустановка), 0 — нельзя (tune на живой ноде).
+configure_log_limits() {
+  local allow_docker_restart="${1:-0}"
+  echo "→ Лимиты логов…"
+
+  if [ -f /etc/systemd/journald.conf ]; then
+    if grep -q '^[[:space:]]*SystemMaxUse=' /etc/systemd/journald.conf; then
+      $SUDO_CMD sed -i 's/^[[:space:]]*SystemMaxUse=.*/SystemMaxUse=200M/' /etc/systemd/journald.conf
+    else
+      echo 'SystemMaxUse=200M' | $SUDO_CMD tee -a /etc/systemd/journald.conf > /dev/null
+    fi
+    $SUDO_CMD journalctl --vacuum-size=200M >/dev/null 2>&1 || true
+    $SUDO_CMD systemctl restart systemd-journald >/dev/null 2>&1 || true
+  fi
+
+  # btmp: неудачные логины. Файл не ротируется сам и вырастает до сотен МБ.
+  $SUDO_CMD truncate -s 0 /var/log/btmp 2>/dev/null || true
+  $SUDO_CMD rm -f /var/log/btmp.1 2>/dev/null || true
+
+  # nginx-заглушка: не выключаем логи совсем, но не даём им расти безгранично.
+  # На части образов logrotate не стоит вообще — без него правило мёртвое.
+  if [ -d /var/log/nginx ] && ! command -v logrotate >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive $SUDO_CMD apt-get install -y -qq logrotate >/dev/null 2>&1 || true
+  fi
+  if [ -d /etc/logrotate.d ] && [ -d /var/log/nginx ] && command -v logrotate >/dev/null 2>&1; then
+    $SUDO_CMD tee /etc/logrotate.d/remnanode-nginx > /dev/null <<'EOF'
+# Managed by remna-agent: заглушка пишет строку на каждый коннект
+/var/log/nginx/*.log {
+    size 20M
+    rotate 3
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+EOF
+  fi
+
+  # docker: json-логи контейнера без лимита пишутся до заполнения диска
+  $SUDO_CMD mkdir -p /etc/docker
+  if [ ! -f /etc/docker/daemon.json ]; then
+    $SUDO_CMD tee /etc/docker/daemon.json > /dev/null <<'EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "50m", "max-file": "3" }
+}
+EOF
+    echo "  /etc/docker/daemon.json: лимит логов 50m x3"
+  elif ! grep -q 'max-size' /etc/docker/daemon.json; then
+    # чужой daemon.json не перезаписываем — аккуратно дописываем свои ключи
+    if command -v python3 >/dev/null 2>&1; then
+      $SUDO_CMD python3 - <<'PY' || echo "  daemon.json: не смог дописать лимит, оставил как есть"
+import json
+p = "/etc/docker/daemon.json"
+try:
+    cfg = json.load(open(p))
+except Exception:
+    raise SystemExit(1)
+cfg.setdefault("log-driver", "json-file")
+cfg.setdefault("log-opts", {}).update({"max-size": "50m", "max-file": "3"})
+json.dump(cfg, open(p, "w"), indent=2)
+PY
+      echo "  /etc/docker/daemon.json: дописан лимит логов 50m x3"
+    fi
+  fi
+
+  # LimitNOFILE для самого демона: контейнеру мы даём 1048576 в compose,
+  # но упереться можно и в лимит dockerd.
+  $SUDO_CMD mkdir -p /etc/systemd/system/docker.service.d
+  $SUDO_CMD tee /etc/systemd/system/docker.service.d/limits.conf > /dev/null <<'EOF'
+[Service]
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+EOF
+  $SUDO_CMD systemctl daemon-reload >/dev/null 2>&1 || true
+
+  if [ "$allow_docker_restart" = "1" ] && command -v docker >/dev/null 2>&1; then
+    $SUDO_CMD systemctl restart docker >/dev/null 2>&1 || true
+  else
+    echo "  лимит docker-логов вступит в силу после перезапуска docker"
+  fi
+  echo "✓ Лимиты логов"
+}
+
 configure_fail2ban() {
     # Nodes sit on public IPv4 with sshd on 22 and collect thousands of password
     # guesses a day. Beyond the obvious risk, the volume fills sshd's MaxStartups
@@ -1254,6 +1379,9 @@ run_repair_host_mode() {
         fi
     ;;
     esac
+
+    configure_base_tuning
+    configure_log_limits 0
 
     prompt_configure_gaming
     prompt_configure_ipv6
@@ -1787,6 +1915,10 @@ fi
 apply_ipv6_choice
 
 configure_conntrack_limits
+
+configure_base_tuning
+
+configure_log_limits 1
 
 configure_fail2ban
 
