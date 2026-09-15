@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "0.1.19"
+VERSION = "0.1.20"
 STARTED_AT = time.time()
 _LAST_CPU = None
 _VIRT_CACHE: tuple[str | None] | None = None
@@ -752,7 +752,7 @@ def peers_info() -> dict:
     if _PEERS_CACHE is not None and (now - _PEERS_CACHE[0]) < _PEERS_TTL:
         return _PEERS_CACHE[1]
 
-    empty = {"proxy_peers": None, "proxy_conns": None}
+    empty = {"proxy_peers": None, "proxy_conns": None, "proxy_top": []}
     lnp = _run_cmd(["ss", "-tlnp"], timeout=2.0)
     if not lnp:
         if _PEERS_CACHE is not None:
@@ -761,7 +761,7 @@ def peers_info() -> dict:
         return empty
     ports = _proxy_listen_ports(lnp)
     if not ports:
-        data = {"proxy_peers": 0, "proxy_conns": 0}
+        data = {"proxy_peers": 0, "proxy_conns": 0, "proxy_top": []}
         _PEERS_CACHE = (now, data)
         return data
 
@@ -773,6 +773,7 @@ def peers_info() -> dict:
         return empty
 
     ips: set[str] = set()
+    per_ip: dict[str, int] = {}
     conns = 0
     for line in est.splitlines():
         addrs = _addr_tokens(line.split())
@@ -783,10 +784,20 @@ def peers_info() -> dict:
             continue
         if _is_loopback_ip(peer[0]):
             continue
-        ips.add(_norm_ip(peer[0]))
+        ip = _norm_ip(peer[0])
+        ips.add(ip)
+        per_ip[ip] = per_ip.get(ip, 0) + 1
         conns += 1
 
-    data = {"proxy_peers": len(ips), "proxy_conns": conns}
+    # Кто именно подключён. На нодах за CDN ядро видит только петлю, и панель
+    # показывает пустой список сессий — а здесь, на публичных портах, лежат
+    # настоящие адреса: у Яндекса это живые клиенты, у Bunny — края CDN.
+    top = sorted(per_ip.items(), key=lambda kv: -kv[1])[:10]
+    data = {
+        "proxy_peers": len(ips),
+        "proxy_conns": conns,
+        "proxy_top": [{"ip": ip, "conns": n} for ip, n in top],
+    }
     _PEERS_CACHE = (now, data)
     return data
 

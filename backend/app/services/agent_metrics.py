@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import httpx
 
@@ -40,6 +40,7 @@ class AgentStatus:
     haproxy_listen: str | None = None
     proxy_peers: int | None = None
     proxy_conns: int | None = None
+    proxy_top: list[dict] = field(default_factory=list)
     cpu_percent: float | None = None
     mem_percent: float | None = None
     disk_percent: float | None = None
@@ -204,6 +205,7 @@ async def _probe_once(
             haproxy_listen=_as_str(data.get("haproxy_listen")),
             proxy_peers=_as_int(data.get("proxy_peers")),
             proxy_conns=_as_int(data.get("proxy_conns")),
+            proxy_top=[x for x in (data.get("proxy_top") or []) if isinstance(x, dict)][:10],
             cpu_percent=data.get("cpu_percent"),
             mem_percent=data.get("mem_percent"),
             disk_percent=data.get("disk_percent"),

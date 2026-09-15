@@ -236,6 +236,7 @@ def _status_to_schema(
         haproxy_version=st.haproxy_version,
         haproxy_listen=st.haproxy_listen,
         proxy_peers=st.proxy_peers,
+        proxy_top=getattr(st, "proxy_top", []) or [],
         proxy_conns=st.proxy_conns,
         cpu_percent=st.cpu_percent,
         mem_percent=st.mem_percent,

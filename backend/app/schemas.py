@@ -121,6 +121,7 @@ class AgentNodeStatus(BaseModel):
     haproxy_version: str | None = None
     haproxy_listen: str | None = None
     proxy_peers: int | None = None
+    proxy_top: list[dict] = Field(default_factory=list)
     proxy_conns: int | None = None
     cpu_percent: float | None = None
     mem_percent: float | None = None

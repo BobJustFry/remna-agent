@@ -559,9 +559,13 @@ function NodeMetricModal({
               value={fmtCount(inboundIps)}
               valueClass={peersToneClass(inboundIps)}
               title={
-                inboundFromXray
-                  ? "уникальные клиентские IP Xray за 15 мин"
-                  : "уникальные входящие TCP (ss)"
+                agent?.proxy_top?.length
+                  ? agent.proxy_top
+                      .map((p) => `${p.ip} — ${p.conns}`)
+                      .join(String.fromCharCode(10))
+                  : inboundFromXray
+                    ? "уникальные клиентские IP Xray за 15 мин"
+                    : "уникальные входящие TCP (ss)"
               }
             />
             <Fact

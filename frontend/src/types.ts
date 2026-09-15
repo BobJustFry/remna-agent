@@ -53,6 +53,7 @@ export type AgentStatus = {
   haproxy_version: string | null;
   haproxy_listen: string | null;
   proxy_peers: number | null;
+  proxy_top?: { ip: string; conns: number }[];
   proxy_conns: number | null;
   cpu_percent: number | null;
   mem_percent: number | null;
