@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "0.1.18"
+VERSION = "0.1.19"
 STARTED_AT = time.time()
 _LAST_CPU = None
 _VIRT_CACHE: tuple[str | None] | None = None
@@ -44,7 +44,10 @@ _HAPROXY_CACHE: tuple[float, dict] | None = None
 _HAPROXY_TTL = 20.0
 _PEERS_CACHE: tuple[float, dict] | None = None
 _PEERS_TTL = 8.0
-_PROXY_PROC = ("rw-core", "xray", "haproxy")
+# nginx здесь не для красоты: на нодах за CDN клиент приходит именно в него
+# (порт 80), а до ядра идёт уже по петле — без nginx счётчик показывал ноль
+# там, где на самом деле шла вся раздача.
+_PROXY_PROC = ("rw-core", "xray", "haproxy", "nginx")
 _WARP_HANDSHAKE_MAX = 180
 _WARP_EGRESS_TTL = 180.0
 _SEMVER_RE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][\w.]+)?)$", re.I)
