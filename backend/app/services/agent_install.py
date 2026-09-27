@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from app.config import settings
 from app.services.agent_reachability import check_agent_reachable
 from app.services.ssh_client import (
     PasswordChangeError,
@@ -439,6 +440,13 @@ def with_ready_ssh(
     )
 
 
+def _clean_ping_targets(raw: str | None) -> str:
+    """Только IP и имена хостов через запятую — строка уходит в env-файл systemd."""
+    parts = [p.strip() for p in (raw or "").split(",")]
+    ok = [p for p in parts if p and all(c.isalnum() or c in ".-:" for c in p)]
+    return ",".join(ok)
+
+
 def install_agent_via_ssh(
     *,
     host: str,
@@ -469,6 +477,11 @@ def install_agent_via_ssh(
         f"REMNA_AGENT_PORT={agent_port}\n"
         f"REMNA_AGENT_HOST=0.0.0.0\n"
     )
+    # Цели пинга до РФ живут в настройках панели, а не в самом агенте: env-файл
+    # переписывается при каждой переустановке, и правка руками на ноде не выжила бы.
+    ru_targets = _clean_ping_targets(settings.agent_ru_ping_targets)
+    if ru_targets:
+        env_file += f"REMNA_AGENT_RU_PING_TARGETS={ru_targets}\n"
 
     _check_cancel(cancel)
     yield f"→ Проверка TCP {host}:{ssh_port}…"

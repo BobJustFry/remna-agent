@@ -102,6 +102,16 @@ class NodeMetricSample(Base):
     # сравнивался бы с потолком, которого тогда не было.
     users_online: Mapped[int | None] = mapped_column(Integer, nullable=True)
     capacity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # TCP-сегменты и ретрансмиты, OOM-kill — ДЕЛЬТЫ за интервал между отсчётами,
+    # а не накопительные счётчики: так шаг графика суммирует их без оглядки на
+    # перезагрузки ноды. Null — старый агент, первый тик или счётчик сбросился.
+    tcp_out_segs: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tcp_retrans_segs: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    oom_kills: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    swap_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Пинг и потери до якорей RIPE Atlas в Москве, как их видит сама нода.
+    ru_ping_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ru_loss_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     node: Mapped["Node"] = relationship(back_populates="metric_samples")
 

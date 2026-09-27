@@ -58,6 +58,16 @@ class AgentStatus:
     net_tx_bps: int | None = None
     net_iface: str | None = None
     net_link_mbps: int | None = None
+    # Своп, пинг/потери до РФ и накопительные счётчики TCP/OOM — с агента 0.1.21.
+    # Счётчики сырые, с загрузки ядра: разницу за интервал считает сэмплер.
+    swap_total_mb: float | None = None
+    swap_percent: float | None = None
+    ru_ping_ms: float | None = None
+    ru_loss_pct: float | None = None
+    tcp_out_segs_total: int | None = None
+    tcp_retrans_segs_total: int | None = None
+    oom_kill_total: int | None = None
+    boot_id: str | None = None
     error: str | None = None
 
 
@@ -219,6 +229,14 @@ async def _probe_once(
             net_tx_bps=_as_int(data.get("net_tx_bps")),
             net_iface=_as_str(data.get("net_iface")),
             net_link_mbps=_as_int(data.get("net_link_mbps")),
+            swap_total_mb=_as_float(data.get("swap_total_mb")),
+            swap_percent=_as_float(data.get("swap_percent")),
+            ru_ping_ms=_as_float(data.get("ru_ping_ms")),
+            ru_loss_pct=_as_float(data.get("ru_loss_pct")),
+            tcp_out_segs_total=_as_int(data.get("tcp_out_segs_total")),
+            tcp_retrans_segs_total=_as_int(data.get("tcp_retrans_segs_total")),
+            oom_kill_total=_as_int(data.get("oom_kill_total")),
+            boot_id=_as_str(data.get("boot_id")),
             error=None,
         )
 

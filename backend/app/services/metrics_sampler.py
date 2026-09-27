@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.db import SessionLocal
 from app.models import Node
 from app.services.agent_metrics import fetch_agent_status
+from app.services.counter_delta import CounterSnapshot, CounterTracker
 from app.services.crypto import decrypt_secret
 from app.services.metrics_store import insert_samples, prune_old
 
@@ -18,6 +19,19 @@ log = logging.getLogger("remna.metrics")
 
 SAMPLE_INTERVAL_SEC = 30.0
 _PRUNE_EVERY = 40
+# Прошлые значения счётчиков TCP/OOM по нодам — для дельт между тиками.
+_counters = CounterTracker()
+
+
+def _snapshot(ag: object | None) -> CounterSnapshot | None:
+    if ag is None or not getattr(ag, "present", False):
+        return None
+    return CounterSnapshot(
+        boot_id=getattr(ag, "boot_id", None),
+        tcp_out=getattr(ag, "tcp_out_segs_total", None),
+        tcp_retrans=getattr(ag, "tcp_retrans_segs_total", None),
+        oom_kill=getattr(ag, "oom_kill_total", None),
+    )
 
 
 async def sample_once() -> int:
@@ -70,6 +84,10 @@ async def sample_once() -> int:
             rx = getattr(ag, "net_rx_bps", None) if ag is not None else None
             tx = getattr(ag, "net_tx_bps", None) if ag is not None else None
             cap = getattr(ag, "capacity_comfort", None) if ag is not None else None
+            swap = getattr(ag, "swap_percent", None) if ag is not None else None
+            ru_ms = getattr(ag, "ru_ping_ms", None) if ag is not None else None
+            ru_loss = getattr(ag, "ru_loss_pct", None) if ag is not None else None
+            deltas = _counters.update(nid, _snapshot(ag))
             rows.append(
                 {
                     "node_id": uuid.UUID(nid),
@@ -82,6 +100,10 @@ async def sample_once() -> int:
                     "net_tx_bps": tx if present else None,
                     "users_online": by_address.get(node.host),
                     "capacity": cap if present else None,
+                    **deltas,
+                    "swap_percent": swap if present else None,
+                    "ru_ping_ms": ru_ms if present else None,
+                    "ru_loss_pct": ru_loss if present else None,
                 }
             )
         return await insert_samples(db, rows)

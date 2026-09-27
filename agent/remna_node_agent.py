@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "0.1.20"
+VERSION = "0.1.21"
 STARTED_AT = time.time()
 _LAST_CPU = None
 _VIRT_CACHE: tuple[str | None] | None = None
@@ -64,6 +64,15 @@ _CF204_PATH = "/generate_204"
 _CF204_INTERVAL = 20.0
 _cf204_lock = threading.Lock()
 _cf204_state: dict = {"ok": None, "ms": None, "at": 0.0}
+# Пинг до России. Своих постоянных замеров до РФ у ноды нет, а именно на этом
+# отрезке живут потери, на которые жалуются клиенты. Цели — якоря RIPE Atlas в
+# Москве (Yandex и RASCOM): они для того и стоят, чтобы их пинговали.
+_RU_PING_DEFAULT_TARGETS = "185.32.187.161,81.27.254.54"
+_RU_PING_COUNT = 5
+_RU_PING_INTERVAL_DEFAULT = 30.0
+_ru_ping_lock = threading.Lock()
+_ru_ping_state: dict = {"ms": None, "loss": None, "targets": None, "at": 0.0}
+_BOOT_ID_CACHE: tuple[str | None] | None = None
 
 
 def env(name: str, default: str | None = None) -> str | None:
@@ -127,6 +136,34 @@ def mem_stats() -> tuple[float | None, float | None, float | None]:
         return total_mb, used_mb, percent
     except Exception:
         return None, None, None
+
+
+def swap_stats() -> dict:
+    """Своп из /proc/meminfo.
+
+    Без свопа процент не считаем: ноль выглядел бы как «своп есть и пуст», а
+    это разные вещи. swap_total_mb = 0 честно говорит, что его нет вовсе.
+    """
+    empty = {"swap_total_mb": None, "swap_used_mb": None, "swap_percent": None}
+    try:
+        info: dict[str, int] = {}
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                key, value = line.split(":", 1)
+                if key in ("SwapTotal", "SwapFree"):
+                    info[key] = int(value.strip().split()[0])  # kB
+        total = info.get("SwapTotal")
+        free = info.get("SwapFree")
+        if total is None or free is None:
+            return empty
+        used = max(0, total - free)
+        return {
+            "swap_total_mb": round(total / 1024, 1),
+            "swap_used_mb": round(used / 1024, 1),
+            "swap_percent": round(used / total * 100.0, 1) if total > 0 else None,
+        }
+    except Exception:
+        return empty
 
 
 def disk_stats(path: str = "/") -> tuple[float | None, float | None, float | None]:
@@ -1029,6 +1066,192 @@ def net_info() -> dict:
     }
 
 
+def boot_id() -> str | None:
+    """Идентификатор текущей загрузки ядра. Меняется при каждой перезагрузке.
+
+    По нему панель понимает, что счётчики ниже обнулились вместе с ядром, и не
+    считает разницу через перезагрузку.
+    """
+    global _BOOT_ID_CACHE
+    if _BOOT_ID_CACHE is not None:
+        return _BOOT_ID_CACHE[0]
+    value = None
+    try:
+        value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip() or None
+    except OSError:
+        value = None
+    _BOOT_ID_CACHE = (value,)
+    return value
+
+
+def tcp_counters() -> dict:
+    """Накопительные счётчики TCP из /proc/net/snmp: OutSegs и RetransSegs.
+
+    Отдаём как есть, с момента загрузки ядра. Разницу за интервал считает
+    панель между своими отсчётами: /metrics опрашивает не только сэмплер, но и
+    живой список нод, и «разница с прошлого опроса» здесь размазала бы
+    ретрансмиты между разными читателями.
+    """
+    empty = {"tcp_out_segs_total": None, "tcp_retrans_segs_total": None}
+    try:
+        with open("/proc/net/snmp", encoding="utf-8") as f:
+            rows = [line.split() for line in f if line.startswith("Tcp:")]
+        # Две строки «Tcp:»: первая — имена полей, вторая — значения.
+        if len(rows) < 2:
+            return empty
+        fields = dict(zip(rows[0][1:], rows[1][1:]))
+        out = fields.get("OutSegs")
+        retrans = fields.get("RetransSegs")
+        return {
+            "tcp_out_segs_total": int(out) if out is not None else None,
+            "tcp_retrans_segs_total": int(retrans) if retrans is not None else None,
+        }
+    except Exception:
+        return empty
+
+
+def oom_kill_total() -> int | None:
+    """Сколько процессов убил OOM-killer с загрузки (/proc/vmstat, ядро ≥ 4.13)."""
+    try:
+        with open("/proc/vmstat", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("oom_kill "):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    return None
+
+
+def _ru_ping_targets() -> list[str]:
+    raw = env("REMNA_AGENT_RU_PING_TARGETS", _RU_PING_DEFAULT_TARGETS) or ""
+    return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _ru_ping_interval() -> float:
+    try:
+        return max(10.0, float(env("REMNA_AGENT_RU_PING_INTERVAL", "") or _RU_PING_INTERVAL_DEFAULT))
+    except ValueError:
+        return _RU_PING_INTERVAL_DEFAULT
+
+
+_PING_SENT_RE = re.compile(r"(\d+) packets transmitted, (\d+) (?:packets )?received")
+# iputils: «rtt min/avg/max/mdev = a/b/c/d ms», busybox: «round-trip min/avg/max = a/b/c ms»
+_PING_RTT_RE = re.compile(r"=\s*[\d.]+/([\d.]+)/")
+
+
+def _ping_target(ip: str) -> dict | None:
+    """Пять ICMP до одной цели. None — замер не состоялся (нет ping, таймаут).
+
+    check_output здесь не годится: при 100% потерь ping выходит с кодом 1, а это
+    как раз тот результат, который нам нужен.
+    """
+    ping = _which("ping")
+    if not ping:
+        return None
+    try:
+        proc = subprocess.run(
+            [ping, "-n", "-q", "-c", str(_RU_PING_COUNT), "-i", "0.2", "-W", "2", ip],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10.0,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = proc.stdout or ""
+    m = _PING_SENT_RE.search(out)
+    if not m:
+        return None
+    sent, recv = int(m.group(1)), int(m.group(2))
+    if sent <= 0:
+        return None
+    rtt = _PING_RTT_RE.search(out)
+    return {
+        "ip": ip,
+        "sent": sent,
+        "recv": recv,
+        "avg_ms": round(float(rtt.group(1)), 1) if rtt and recv else None,
+    }
+
+
+def _ru_ping_aggregate(results: list[dict]) -> tuple[float | None, float | None]:
+    """Сводим цели в одну пару «пинг / потери».
+
+    Цель, не ответившую ни разу, выкидываем, пока отвечает другая: якорь
+    Atlas может уйти на обслуживание, и тогда половина потерь была бы
+    выдуманной. Молчат все — это и есть 100% потерь до России.
+    """
+    if not results:
+        return None, None
+    alive = [r for r in results if r["recv"] > 0]
+    if not alive:
+        return None, 100.0
+    sent = sum(r["sent"] for r in alive)
+    recv = sum(r["recv"] for r in alive)
+    loss = round(max(0.0, (sent - recv) / sent * 100.0), 1)
+    weighted = [(r["avg_ms"], r["recv"]) for r in alive if r["avg_ms"] is not None]
+    ms = None
+    if weighted:
+        total = sum(n for _, n in weighted)
+        ms = round(sum(v * n for v, n in weighted) / total, 1) if total else None
+    return ms, loss
+
+
+def _ru_ping_once() -> None:
+    targets = _ru_ping_targets()
+    results: list[dict | None] = [None] * len(targets)
+
+    def one(i: int, ip: str) -> None:
+        results[i] = _ping_target(ip)
+
+    # Цели пингуем параллельно: так замер занимает ~1–2 с, а не сумму по целям.
+    threads = [
+        threading.Thread(target=one, args=(i, ip), daemon=True, name=f"ru-ping-{i}")
+        for i, ip in enumerate(targets)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=12.0)
+    done = [r for r in results if r is not None]
+    ms, loss = _ru_ping_aggregate(done)
+    with _ru_ping_lock:
+        _ru_ping_state["ms"] = ms
+        _ru_ping_state["loss"] = loss
+        _ru_ping_state["targets"] = done or None
+        _ru_ping_state["at"] = time.time()
+
+
+def _ru_ping_loop() -> None:
+    interval = _ru_ping_interval()
+    while True:
+        started = time.monotonic()
+        try:
+            _ru_ping_once()
+        except Exception:
+            pass
+        time.sleep(max(1.0, interval - (time.monotonic() - started)))
+
+
+def start_ru_ping_loop() -> None:
+    """Пинг до РФ крутится в своём потоке: /metrics никогда его не ждёт."""
+    if not _ru_ping_targets():
+        return
+    threading.Thread(target=_ru_ping_loop, daemon=True, name="ru-ping").start()
+
+
+def ru_ping_info() -> dict:
+    with _ru_ping_lock:
+        at = float(_ru_ping_state["at"] or 0)
+        # Поток встал или ещё не отработал — лучше пусто, чем старая цифра.
+        fresh = at > 0 and time.time() - at < _ru_ping_interval() * 4
+        return {
+            "ru_ping_ms": _ru_ping_state["ms"] if fresh else None,
+            "ru_loss_pct": _ru_ping_state["loss"] if fresh else None,
+            "ru_ping_targets": _ru_ping_state["targets"] if fresh else None,
+        }
+
+
 def collect_metrics() -> dict:
     mem_total, mem_used, mem_percent = mem_stats()
     disk_total, disk_used, disk_percent = disk_stats("/")
@@ -1055,6 +1278,11 @@ def collect_metrics() -> dict:
         **peers,
         **cf204_info(),
         **net_info(),
+        **swap_stats(),
+        **tcp_counters(),
+        "oom_kill_total": oom_kill_total(),
+        "boot_id": boot_id(),
+        **ru_ping_info(),
         **capacity_info(mem_total, load, rn_running, haproxy.get("haproxy_present")),
     }
 
@@ -1144,6 +1372,7 @@ def main() -> None:
         raise SystemExit("REMNA_AGENT_TOKEN is required")
 
     start_cf204_loop()
+    start_ru_ping_loop()
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
     httpd.agent_token = token  # type: ignore[attr-defined]

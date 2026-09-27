@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     openapi_url: str = "/openapi.json"
     allowed_hosts: str = "*"
     trust_proxy: bool = False
+    # Куда агент на ноде пингует «до России»: якоря RIPE Atlas в Москве
+    # (Yandex, RASCOM). Уезжает в /etc/remna-agent.env при установке агента.
+    agent_ru_ping_targets: str = "185.32.187.161,81.27.254.54"
 
     @model_validator(mode="after")
     def apply_production_defaults(self) -> "Settings":

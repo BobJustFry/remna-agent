@@ -70,6 +70,11 @@ export type AgentStatus = {
   net_tx_bps: number | null;
   net_iface: string | null;
   net_link_mbps: number | null;
+  /** Своп и пинг/потери до РФ прямо сейчас. Нет на агентах < 0.1.21. */
+  swap_total_mb?: number | null;
+  swap_percent?: number | null;
+  ru_ping_ms?: number | null;
+  ru_loss_pct?: number | null;
   /** Channel limit of this node's hosting, Mbit/s. */
   hosting_bandwidth_mbps: number | null;
   /** Users the Xray core reports online, delivered with this node's own event. */
@@ -120,6 +125,16 @@ export type MetricPoint = {
   net_tx_bps: number | null;
   users_online: number | null;
   capacity: number | null;
+  /** Суммы дельт TCP за шаг; retr_pct = retrans / out · 100. Null на агентах < 0.1.21. */
+  tcp_out_segs?: number | null;
+  tcp_retrans_segs?: number | null;
+  retr_pct?: number | null;
+  /** Сколько процессов убил OOM-killer за шаг. */
+  oom_kills?: number | null;
+  swap_percent?: number | null;
+  /** Пинг и потери до якорей RIPE Atlas в Москве, с самой ноды. */
+  ru_ping_ms?: number | null;
+  ru_loss_pct?: number | null;
 };
 
 export type NodesMetricsResponse = {

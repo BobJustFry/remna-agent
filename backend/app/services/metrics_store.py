@@ -1,4 +1,4 @@
-"""Query and insert node metric history (ping / CPU / RAM / disk)."""
+"""Query and insert node metric history (ping / CPU / RAM / disk / TCP / swap / OOM / RU ping)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import NodeMetricSample
+from app.services.counter_delta import retr_pct
 
 MetricRange = Literal["day", "week", "month", "all"]
 
@@ -74,6 +75,12 @@ async def insert_samples(
             net_tx_bps=_as_bps(row.get("net_tx_bps")),
             users_online=_as_int(row.get("users_online")),
             capacity=_as_int(row.get("capacity")),
+            tcp_out_segs=_as_int(row.get("tcp_out_segs")),
+            tcp_retrans_segs=_as_int(row.get("tcp_retrans_segs")),
+            oom_kills=_as_int(row.get("oom_kills")),
+            swap_percent=_round(row.get("swap_percent")),
+            ru_ping_ms=_round(row.get("ru_ping_ms")),
+            ru_loss_pct=_round(row.get("ru_loss_pct")),
         )
         for row in rows
     ]
@@ -154,6 +161,14 @@ async def fetch_series(
         func.avg(NodeMetricSample.net_tx_bps).label("net_tx_bps"),
         func.avg(NodeMetricSample.users_online).label("users_online"),
         func.max(NodeMetricSample.capacity).label("capacity"),
+        # Дельты складываем: за шаг графика важно, сколько всего ушло и сколько
+        # из этого пришлось повторить, а доля считается уже от сумм.
+        func.sum(NodeMetricSample.tcp_out_segs).label("tcp_out_segs"),
+        func.sum(NodeMetricSample.tcp_retrans_segs).label("tcp_retrans_segs"),
+        func.sum(NodeMetricSample.oom_kills).label("oom_kills"),
+        func.avg(NodeMetricSample.swap_percent).label("swap_percent"),
+        func.avg(NodeMetricSample.ru_ping_ms).label("ru_ping_ms"),
+        func.avg(NodeMetricSample.ru_loss_pct).label("ru_loss_pct"),
     )
     if since is not None:
         stmt = stmt.where(NodeMetricSample.recorded_at >= since)
@@ -174,6 +189,12 @@ async def fetch_series(
         net_tx_bps,
         users_online,
         capacity,
+        tcp_out_segs,
+        tcp_retrans_segs,
+        oom_kills,
+        swap_percent,
+        ru_ping_ms,
+        ru_loss_pct,
     ) in result.all():
         if t_raw is None:
             continue
@@ -189,6 +210,13 @@ async def fetch_series(
                 "net_tx_bps": _as_bps(net_tx_bps),
                 "users_online": _round(users_online),
                 "capacity": _as_int(capacity),
+                "tcp_out_segs": _as_int(tcp_out_segs),
+                "tcp_retrans_segs": _as_int(tcp_retrans_segs),
+                "retr_pct": retr_pct(tcp_retrans_segs, tcp_out_segs),
+                "oom_kills": _as_int(oom_kills),
+                "swap_percent": _round(swap_percent),
+                "ru_ping_ms": _round(ru_ping_ms),
+                "ru_loss_pct": _round(ru_loss_pct),
             }
         )
     return step, from_ts, to_ts, series

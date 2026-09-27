@@ -17,6 +17,14 @@ import { inboundPeerCount, inboundPeerFromXray } from "../lib/inboundPeerCount";
 import { pingToneClass } from "../lib/pingTone";
 import { capacityLabel, capacityTitle, capacityToneClass } from "../lib/capacityTone";
 import { bandwidthTitle, bandwidthToneClass, formatUpDown } from "../lib/bandwidth";
+import {
+  fmtRetr,
+  lastValue,
+  lossToneClass,
+  retrToneClass,
+  ruPingLabel,
+  sumValues,
+} from "../lib/healthTone";
 import { OnlineBadge } from "./OnlineBadge";
 import { SharedBadge } from "./SharedBadge";
 import { useSharingStatus } from "../hooks/useSharingStatus";
@@ -26,6 +34,10 @@ const CPU = "#e6a23c";
 const DISK = "#6aa7d8";
 const MEM = "#3dd68c";
 const NET = "#b98cd6";
+const RETR = "#f78c6c";
+const SWAP = "#c3a6ff";
+const OOM = "#f07178";
+const RU = "#82aaff";
 const ONLINE_OK = "#3dd68c";
 const ONLINE_WARN = "#e6a23c";
 const ONLINE_DANGER = "#f07178";
@@ -256,8 +268,17 @@ function NodeTile({
   const netPeak =
     netRx == null && netTx == null ? null : Math.max(netRx ?? 0, netTx ?? 0);
   const times = points.map((p) => p.t);
+  // Ретрансмиты считаются между отсчётами панели, живого значения у агента нет —
+  // берём последний шаг истории. OOM — сумма за видимый период.
+  const retrSeries = points.map((p) => p.retr_pct ?? null);
+  const retrLast = lastValue(retrSeries);
+  const oomTotal = sumValues(points.map((p) => p.oom_kills));
+  const ruMs = agent?.present ? agent.ru_ping_ms ?? null : null;
+  const ruLoss = agent?.present ? agent.ru_loss_pct ?? null : null;
+  const swapLive = agent?.present ? agent.swap_percent ?? null : null;
+  const swapAbsent = !!agent?.present && agent.swap_total_mb === 0;
   return (
-    <article className="relative flex min-h-[162px] flex-col rounded-md border border-[var(--border)] bg-[var(--bg-elevated)] px-1.5 py-1">
+    <article className="relative flex min-h-[222px] flex-col rounded-md border border-[var(--border)] bg-[var(--bg-elevated)] px-1.5 py-1">
       <div className="flex min-w-0 items-center gap-1 pr-5">
         <CountryFlag code={node.country_code} size={10} />
         <div className="min-w-0 flex-1 truncate text-[11px] font-semibold leading-tight text-[var(--text)]">
@@ -275,7 +296,7 @@ function NodeTile({
       >
         <ExpandIcon />
       </button>
-      <div className="mt-0.5 grid min-h-0 flex-1 grid-rows-[1fr_1fr_1fr_auto_1fr] gap-0.5">
+      <div className="mt-0.5 grid min-h-0 flex-1 grid-rows-[1fr_1fr_1fr_auto_1fr_1fr_1fr_auto] gap-0.5">
         <SparkRow
           label="онлайн"
           value={capacityLabel(xrayOnline, capacity)}
@@ -330,6 +351,45 @@ function NodeTile({
           refY={bandwidthLimit ? bandwidthLimit * 1_000_000 : undefined}
           title={bandwidthTitle(netRx, netTx, bandwidthLimit, agent?.net_iface)}
         />
+        <SparkRow
+          label="до РФ"
+          value={ruPingLabel(ruMs, ruLoss)}
+          valueClass={`${lossToneClass(ruLoss)} text-[10px]`}
+          color={RU}
+          times={times}
+          values={points.map((p) => p.ru_ping_ms ?? null)}
+          fromTs={fromTs}
+          toTs={toTs}
+          title="Пинг и потери с ноды до якорей RIPE Atlas в Москве (Yandex, RASCOM), по 5 ICMP раз в 30 с. График — пинг."
+        />
+        <SparkRow
+          label="ретр. TCP"
+          value={fmtRetr(retrLast)}
+          valueClass={`${retrToneClass(retrLast)} text-[11px]`}
+          color={RETR}
+          times={times}
+          values={retrSeries}
+          fromTs={fromTs}
+          toTs={toTs}
+          title="Доля TCP-ретрансмитов: RetransSegs / OutSegs за шаг. Цифра — последний шаг истории."
+        />
+        <BarRow
+          label="своп"
+          percent={swapLive}
+          color={SWAP}
+          title={swapAbsent ? "Свопа на ноде нет" : "Занято свопа"}
+          emptyText={swapAbsent ? "нет" : "—"}
+          extra={
+            oomTotal != null && oomTotal > 0 ? (
+              <span
+                className="shrink-0 rounded px-1 text-[9px] font-bold text-[var(--danger)] ring-1 ring-[var(--danger)]"
+                title={`OOM-killer убил процессов за период: ${Math.round(oomTotal)}`}
+              >
+                OOM×{Math.round(oomTotal)}
+              </span>
+            ) : null
+          }
+        />
       </div>
     </article>
   );
@@ -339,17 +399,23 @@ function BarRow({
   label,
   percent,
   color,
+  title = "Занято на диске",
+  emptyText = "—",
+  extra,
 }: {
   label: string;
   percent: number | null | undefined;
   color: string;
+  title?: string;
+  emptyText?: string;
+  extra?: ReactNode;
 }) {
   const pct = percent != null && Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : null;
   // Same 70/90 bands as the online and channel figures, so one glance reads the
   // same way everywhere on the tile. Below 70 the bar keeps its neutral colour.
   const tone = pct == null || pct < 70 ? color : pct < 90 ? "var(--warning)" : "var(--danger)";
   return (
-    <div className="flex items-center gap-1" title="Занято на диске">
+    <div className="flex items-center gap-1" title={title}>
       <div className="w-[68px] shrink-0 leading-tight">
         <div className="text-[9px] uppercase tracking-wide text-[var(--muted)]">{label}</div>
       </div>
@@ -360,8 +426,9 @@ function BarRow({
           )}
         </div>
         <span className="shrink-0 text-[10px] font-semibold tabular-nums" style={{ color: tone }}>
-          {pct != null ? `${Math.round(pct)}%` : "—"}
+          {pct != null ? `${Math.round(pct)}%` : emptyText}
         </span>
+        {extra}
       </div>
     </div>
   );
@@ -423,6 +490,9 @@ const toMbit = (bps: number | null | undefined) =>
 
 const fmtMbit = (n: number) => (n >= 10 ? String(Math.round(n)) : n.toFixed(1));
 
+// Ретрансмиты и потери обычно доли процента: целые на оси схлопнули бы шкалу в «0 0 1».
+const fmtPctAxis = (n: number) => (n >= 10 || n === 0 ? String(Math.round(n)) : n.toFixed(1));
+
 function NodeMetricModal({
   node,
   status,
@@ -458,6 +528,17 @@ function NodeMetricModal({
   const onlineAvg = onlineNums.length
     ? Math.round(onlineNums.reduce((a, b) => a + b, 0) / onlineNums.length)
     : 0;
+  // Ретрансмиты за весь период — от сумм сегментов, а не среднее процентов.
+  const segOut = sumValues(points.map((p) => p.tcp_out_segs));
+  const segRetr = sumValues(points.map((p) => p.tcp_retrans_segs));
+  const retrPeriod = segOut && segRetr != null ? (segRetr / segOut) * 100 : null;
+  const oomPeriod = sumValues(points.map((p) => p.oom_kills));
+  const ruLossNums = points
+    .map((p) => p.ru_loss_pct)
+    .filter((v): v is number => v != null && Number.isFinite(v));
+  const ruLossAvg = ruLossNums.length
+    ? ruLossNums.reduce((a, b) => a + b, 0) / ruLossNums.length
+    : null;
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -619,6 +700,39 @@ function NodeMetricModal({
                   : "—"
               }
             />
+            <Fact
+              label="до РФ"
+              value={ruPingLabel(
+                agent?.present ? agent.ru_ping_ms ?? null : null,
+                agent?.present ? agent.ru_loss_pct ?? null : null,
+              )}
+              valueClass={lossToneClass(agent?.present ? agent.ru_loss_pct ?? null : null)}
+              title="Пинг и потери до якорей RIPE Atlas в Москве, последний замер"
+            />
+            <Fact
+              label="ретр. TCP"
+              value={fmtRetr(retrPeriod)}
+              valueClass={retrToneClass(retrPeriod)}
+              title="RetransSegs / OutSegs за выбранный период"
+            />
+            <Fact
+              label="своп"
+              value={
+                agent?.present && agent.swap_total_mb === 0
+                  ? "нет"
+                  : fmtPct(agent?.present ? agent.swap_percent ?? null : null)
+              }
+            />
+            <Fact
+              label="OOM"
+              value={oomPeriod == null ? "—" : String(Math.round(oomPeriod))}
+              valueClass={
+                oomPeriod != null && oomPeriod > 0
+                  ? "font-bold tabular-nums text-[var(--danger)]"
+                  : undefined
+              }
+              title="Сколько процессов убил OOM-killer за выбранный период"
+            />
             <Fact label="агент" value={agent?.version ? `v${agent.version}` : "—"} />
             <Fact
               label="RemnaNode"
@@ -709,6 +823,62 @@ function NodeMetricModal({
                 formatY={fmtMbit}
               />
             </ChartBlock>
+            <ChartBlock title="Пинг до РФ (RIPE Atlas, Москва)" unit="мс">
+              <NodeMetricLineChart
+                {...chart}
+                values={points.map((p) => p.ru_ping_ms ?? null)}
+                color={RU}
+                unit="мс"
+              />
+            </ChartBlock>
+            <ChartBlock
+              title={`Потери до РФ${ruLossAvg != null ? ` · среднее ${ruLossAvg.toFixed(1)}%` : ""}`}
+              unit="%"
+            >
+              <NodeMetricLineChart
+                {...chart}
+                values={points.map((p) => p.ru_loss_pct ?? null)}
+                color={OOM}
+                unit="%"
+                formatY={fmtPctAxis}
+              />
+            </ChartBlock>
+            <ChartBlock
+              title={`Ретрансмиты TCP${retrPeriod != null ? ` · за период ${fmtRetr(retrPeriod)}` : ""}`}
+              unit="%"
+            >
+              <NodeMetricLineChart
+                {...chart}
+                values={points.map((p) => p.retr_pct ?? null)}
+                color={RETR}
+                unit="%"
+                formatY={fmtPctAxis}
+              />
+            </ChartBlock>
+            <ChartBlock title="Своп" unit="%">
+              <NodeMetricLineChart
+                {...chart}
+                values={points.map((p) => p.swap_percent ?? null)}
+                color={SWAP}
+                unit="%"
+                maxY={100}
+              />
+            </ChartBlock>
+            <div className="sm:col-span-2">
+              <ChartBlock
+                title={`OOM-kill${oomPeriod != null ? ` · за период ${Math.round(oomPeriod)}` : ""}`}
+                unit="процессов за шаг"
+              >
+                <NodeMetricLineChart
+                  {...chart}
+                  height={96}
+                  values={points.map((p) => p.oom_kills ?? null)}
+                  color={OOM}
+                  unit="шт."
+                  bars
+                />
+              </ChartBlock>
+            </div>
           </div>
         </div>
       </div>

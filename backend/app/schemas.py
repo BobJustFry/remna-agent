@@ -136,6 +136,11 @@ class AgentNodeStatus(BaseModel):
     net_tx_bps: int | None = None
     net_iface: str | None = None
     net_link_mbps: int | None = None
+    # Своп и пинг/потери до РФ прямо сейчас. Null на агентах старше 0.1.21.
+    swap_total_mb: float | None = None
+    swap_percent: float | None = None
+    ru_ping_ms: float | None = None
+    ru_loss_pct: float | None = None
     # Channel limit of the node's hosting, Mbit/s — null when the hosting has none set.
     hosting_bandwidth_mbps: int | None = None
     # Users the Xray core reports online. Rides with the node event so it does not
@@ -197,6 +202,15 @@ class MetricPointOut(BaseModel):
     net_tx_bps: int | None = None
     users_online: float | None = None
     capacity: int | None = None
+    # Сегменты и ретрансмиты — суммы дельт за шаг; retr_pct = retrans / out * 100.
+    tcp_out_segs: int | None = None
+    tcp_retrans_segs: int | None = None
+    retr_pct: float | None = None
+    # Сколько процессов убил OOM-killer за шаг.
+    oom_kills: int | None = None
+    swap_percent: float | None = None
+    ru_ping_ms: float | None = None
+    ru_loss_pct: float | None = None
 
 
 class NodesMetricsResponse(BaseModel):

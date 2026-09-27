@@ -22,6 +22,11 @@ type Props = {
    */
   refY?: number;
   refLabel?: string;
+  /**
+   * Столбцы вместо линии — для счётчиков событий за шаг (OOM-kill): линия между
+   * «0» и «2» рисовала бы события там, где их не было.
+   */
+  bars?: boolean;
 };
 
 export function NodeMetricLineChart({
@@ -36,6 +41,7 @@ export function NodeMetricLineChart({
   xMax,
   refY,
   refLabel,
+  bars = false,
 }: Props) {
   const [hover, setHover] = useState<{ i: number; x: number; px: number } | null>(null);
   const w = 640;
@@ -86,8 +92,9 @@ export function NodeMetricLineChart({
       ? { y: refY > yMax ? pad.t : yAt(refY), clamped: refY > yMax }
       : null;
 
-  const path = linePath(times, values, xAtT, yAt);
-  const area = areaPath(times, values, xAtT, yAt, pad.t + innerH);
+  const path = bars ? "" : linePath(times, values, xAtT, yAt);
+  const area = bars ? "" : areaPath(times, values, xAtT, yAt, pad.t + innerH);
+  const barW = bars ? barWidth(times, span, innerW) : 0;
 
   return (
     <div className="relative">
@@ -150,6 +157,23 @@ export function NodeMetricLineChart({
             {formatTick(t, span)}
           </text>
         ))}
+        {bars &&
+          values.map((v, i) => {
+            const t = times[i];
+            if (v == null || !Number.isFinite(v) || v <= 0 || t == null) return null;
+            const y = yAt(v);
+            return (
+              <rect
+                key={`b-${i}`}
+                x={xAtT(t) - barW / 2}
+                y={y}
+                width={barW}
+                height={Math.max(1, pad.t + innerH - y)}
+                fill={color}
+                opacity="0.85"
+              />
+            );
+          })}
         {area && <path d={area} fill={color} opacity="0.12" />}
         {path && (
           <path d={path} fill="none" stroke={color} strokeWidth="1.8" strokeLinejoin="round" />
@@ -237,6 +261,17 @@ function areaPath(
   });
   if (first < 0) return "";
   return `${line} L${xAtT(times[last]).toFixed(1)},${baseline.toFixed(1)} L${xAtT(times[first]).toFixed(1)},${baseline.toFixed(1)} Z`;
+}
+
+/** Ширина столбца по шагу между соседними точками, чтобы соседние не слипались. */
+function barWidth(times: number[], span: number, innerW: number): number {
+  let step = Infinity;
+  for (let i = 1; i < times.length; i++) {
+    const d = times[i] - times[i - 1];
+    if (d > 0 && d < step) step = d;
+  }
+  if (!Number.isFinite(step)) return 3;
+  return Math.max(1.5, Math.min(10, (step / span) * innerW * 0.8));
 }
 
 function niceMax(n: number): number {
