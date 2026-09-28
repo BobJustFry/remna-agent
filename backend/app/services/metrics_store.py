@@ -9,8 +9,9 @@ from typing import Literal
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models import NodeMetricSample
-from app.services.counter_delta import retr_pct
+from app.services.counter_delta import retr_data_segs, retr_point
 
 MetricRange = Literal["day", "week", "month", "all"]
 
@@ -28,6 +29,9 @@ _RANGE_STEP: dict[str, int] = {
     "all": 6 * 3600,
 }
 _RETENTION = timedelta(days=180)
+# Интервал сэмплера: живёт здесь, потому что по нему же история знает, сколько
+# времени покрывает один отсчёт (порог объёма для ретрансмитов).
+SAMPLE_INTERVAL_SEC = 30.0
 _MAX_POINTS = 420
 
 
@@ -77,6 +81,8 @@ async def insert_samples(
             capacity=_as_int(row.get("capacity")),
             tcp_out_segs=_as_int(row.get("tcp_out_segs")),
             tcp_retrans_segs=_as_int(row.get("tcp_retrans_segs")),
+            tcp_syn_retrans=_as_int(row.get("tcp_syn_retrans")),
+            tcp_orig_data_sent=_as_int(row.get("tcp_orig_data_sent")),
             oom_kills=_as_int(row.get("oom_kills")),
             swap_percent=_round(row.get("swap_percent")),
             ru_ping_ms=_round(row.get("ru_ping_ms")),
@@ -165,6 +171,16 @@ async def fetch_series(
         # из этого пришлось повторить, а доля считается уже от сумм.
         func.sum(NodeMetricSample.tcp_out_segs).label("tcp_out_segs"),
         func.sum(NodeMetricSample.tcp_retrans_segs).label("tcp_retrans_segs"),
+        # Для новой формулы ретрансмиты берём только из отсчётов, где есть и SYN,
+        # и сегменты с данными: в шаге, где агент обновился, старые отсчёты иначе
+        # попали бы в числитель без своей пары. Число таких отсчётов — чтобы
+        # пересчитать порог объёма на время, которое точка реально покрывает.
+        func.sum(NodeMetricSample.tcp_retrans_segs)
+        .filter(NodeMetricSample.tcp_orig_data_sent.is_not(None))
+        .label("tcp_retrans_new"),
+        func.sum(NodeMetricSample.tcp_syn_retrans).label("tcp_syn_retrans"),
+        func.sum(NodeMetricSample.tcp_orig_data_sent).label("tcp_orig_data_sent"),
+        func.count(NodeMetricSample.tcp_orig_data_sent).label("data_samples"),
         func.sum(NodeMetricSample.oom_kills).label("oom_kills"),
         func.avg(NodeMetricSample.swap_percent).label("swap_percent"),
         func.avg(NodeMetricSample.ru_ping_ms).label("ru_ping_ms"),
@@ -191,6 +207,10 @@ async def fetch_series(
         capacity,
         tcp_out_segs,
         tcp_retrans_segs,
+        tcp_retrans_new,
+        tcp_syn_retrans,
+        tcp_orig_data_sent,
+        data_samples,
         oom_kills,
         swap_percent,
         ru_ping_ms,
@@ -199,6 +219,16 @@ async def fetch_series(
         if t_raw is None:
             continue
         key = str(node_uuid)
+        pct, low_volume = retr_point(
+            retrans=tcp_retrans_segs,
+            out=tcp_out_segs,
+            retrans_new=tcp_retrans_new,
+            syn_retrans=tcp_syn_retrans,
+            orig_data=tcp_orig_data_sent,
+            covered_sec=min(float(step), float(data_samples or 0) * SAMPLE_INTERVAL_SEC),
+            min_segs_5min=settings.retr_min_data_segs_5min,
+        )
+        new_formula = tcp_syn_retrans is not None and tcp_orig_data_sent is not None
         series.setdefault(key, []).append(
             {
                 "t": round(float(t_raw), 3),
@@ -212,7 +242,13 @@ async def fetch_series(
                 "capacity": _as_int(capacity),
                 "tcp_out_segs": _as_int(tcp_out_segs),
                 "tcp_retrans_segs": _as_int(tcp_retrans_segs),
-                "retr_pct": retr_pct(tcp_retrans_segs, tcp_out_segs),
+                "tcp_syn_retrans": _as_int(tcp_syn_retrans),
+                "tcp_orig_data_sent": _as_int(tcp_orig_data_sent),
+                "tcp_retrans_no_syn": (
+                    retr_data_segs(tcp_retrans_new, tcp_syn_retrans) if new_formula else None
+                ),
+                "retr_pct": pct,
+                "retr_low_volume": low_volume,
                 "oom_kills": _as_int(oom_kills),
                 "swap_percent": _round(swap_percent),
                 "ru_ping_ms": _round(ru_ping_ms),

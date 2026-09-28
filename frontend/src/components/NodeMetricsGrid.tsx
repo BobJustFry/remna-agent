@@ -19,8 +19,10 @@ import { capacityLabel, capacityTitle, capacityToneClass } from "../lib/capacity
 import { bandwidthTitle, bandwidthToneClass, formatUpDown } from "../lib/bandwidth";
 import {
   fmtRetr,
-  lastValue,
+  lastRetr,
   lossToneClass,
+  periodRetr,
+  RETR_LOW_VOLUME_HINT,
   retrToneClass,
   ruPingLabel,
   sumValues,
@@ -271,7 +273,8 @@ function NodeTile({
   // Ретрансмиты считаются между отсчётами панели, живого значения у агента нет —
   // берём последний шаг истории. OOM — сумма за видимый период.
   const retrSeries = points.map((p) => p.retr_pct ?? null);
-  const retrLast = lastValue(retrSeries);
+  const retrDim = points.map((p) => p.retr_low_volume === true);
+  const retrLast = lastRetr(points);
   const oomTotal = sumValues(points.map((p) => p.oom_kills));
   const ruMs = agent?.present ? agent.ru_ping_ms ?? null : null;
   const ruLoss = agent?.present ? agent.ru_loss_pct ?? null : null;
@@ -364,14 +367,18 @@ function NodeTile({
         />
         <SparkRow
           label="ретр. TCP"
-          value={fmtRetr(retrLast)}
-          valueClass={`${retrToneClass(retrLast)} text-[11px]`}
+          value={fmtRetr(retrLast.pct)}
+          valueClass={`${retrToneClass(retrLast.pct, retrLast.low)} text-[11px]`}
           color={RETR}
           times={times}
           values={retrSeries}
+          dim={retrDim}
           fromTs={fromTs}
           toTs={toTs}
-          title="Доля TCP-ретрансмитов: RetransSegs / OutSegs за шаг. Цифра — последний шаг истории."
+          title={
+            (retrLast.low ? `За последний шаг ${RETR_LOW_VOLUME_HINT} — доле верить рано. ` : "") +
+            "Доля TCP-ретрансмитов за шаг: (RetransSegs − SYN-повторы) / сегменты с данными; на агентах до 0.1.22 — RetransSegs / OutSegs. Цифра — последний шаг истории, серым — мало трафика."
+          }
         />
         <BarRow
           label="своп"
@@ -446,6 +453,7 @@ function SparkRow({
   maxY,
   refY,
   title,
+  dim,
 }: {
   label: string;
   value: string;
@@ -458,6 +466,7 @@ function SparkRow({
   maxY?: number;
   refY?: number;
   title?: string;
+  dim?: Array<boolean>;
 }) {
   return (
     <div className="flex min-h-0 items-stretch gap-1" title={title}>
@@ -479,6 +488,7 @@ function SparkRow({
           refY={refY}
           fromTs={fromTs}
           toTs={toTs}
+          dim={dim}
         />
       </div>
     </div>
@@ -529,9 +539,8 @@ function NodeMetricModal({
     ? Math.round(onlineNums.reduce((a, b) => a + b, 0) / onlineNums.length)
     : 0;
   // Ретрансмиты за весь период — от сумм сегментов, а не среднее процентов.
-  const segOut = sumValues(points.map((p) => p.tcp_out_segs));
-  const segRetr = sumValues(points.map((p) => p.tcp_retrans_segs));
-  const retrPeriod = segOut && segRetr != null ? (segRetr / segOut) * 100 : null;
+  const retrPeriod = periodRetr(points);
+  const retrDim = points.map((p) => p.retr_low_volume === true);
   const oomPeriod = sumValues(points.map((p) => p.oom_kills));
   const ruLossNums = points
     .map((p) => p.ru_loss_pct)
@@ -711,9 +720,12 @@ function NodeMetricModal({
             />
             <Fact
               label="ретр. TCP"
-              value={fmtRetr(retrPeriod)}
-              valueClass={retrToneClass(retrPeriod)}
-              title="RetransSegs / OutSegs за выбранный период"
+              value={fmtRetr(retrPeriod.pct)}
+              valueClass={retrToneClass(retrPeriod.pct, retrPeriod.low)}
+              title={
+                (retrPeriod.low ? `За весь период ${RETR_LOW_VOLUME_HINT} — цифре верить рано. ` : "") +
+                "(RetransSegs − SYN-повторы) / сегменты с данными за выбранный период; на агентах до 0.1.22 — RetransSegs / OutSegs"
+              }
             />
             <Fact
               label="своп"
@@ -844,7 +856,11 @@ function NodeMetricModal({
               />
             </ChartBlock>
             <ChartBlock
-              title={`Ретрансмиты TCP${retrPeriod != null ? ` · за период ${fmtRetr(retrPeriod)}` : ""}`}
+              title={`Ретрансмиты TCP${
+                retrPeriod.pct != null
+                  ? ` · за период ${fmtRetr(retrPeriod.pct)}${retrPeriod.low ? ` (${RETR_LOW_VOLUME_HINT})` : ""}`
+                  : ""
+              }${retrDim.some(Boolean) ? " · серым — мало трафика" : ""}`}
               unit="%"
             >
               <NodeMetricLineChart
@@ -853,6 +869,8 @@ function NodeMetricModal({
                 color={RETR}
                 unit="%"
                 formatY={fmtPctAxis}
+                dim={retrDim}
+                dimLabel={RETR_LOW_VOLUME_HINT}
               />
             </ChartBlock>
             <ChartBlock title="Своп" unit="%">

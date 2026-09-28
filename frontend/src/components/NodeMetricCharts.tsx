@@ -27,6 +27,12 @@ type Props = {
    * «0» и «2» рисовала бы события там, где их не было.
    */
   bars?: boolean;
+  /**
+   * Точки, которым верить рано (ретрансмиты при малом трафике): линия через них
+   * серая, в тултипе — пометка. Цветом рисуются только остальные точки.
+   */
+  dim?: Array<boolean>;
+  dimLabel?: string;
 };
 
 export function NodeMetricLineChart({
@@ -42,6 +48,8 @@ export function NodeMetricLineChart({
   refY,
   refLabel,
   bars = false,
+  dim,
+  dimLabel = "мало данных",
 }: Props) {
   const [hover, setHover] = useState<{ i: number; x: number; px: number } | null>(null);
   const w = 640;
@@ -92,8 +100,12 @@ export function NodeMetricLineChart({
       ? { y: refY > yMax ? pad.t : yAt(refY), clamped: refY > yMax }
       : null;
 
-  const path = bars ? "" : linePath(times, values, xAtT, yAt);
-  const area = bars ? "" : areaPath(times, values, xAtT, yAt, pad.t + innerH);
+  const hasDim = !bars && !!dim?.some(Boolean);
+  // С пометками: вся линия — серая подложка, цветом — только точки без пометки.
+  const bright = hasDim ? values.map((v, i) => (dim?.[i] ? null : v)) : values;
+  const dimPath = hasDim ? linePath(times, values, xAtT, yAt) : "";
+  const path = bars ? "" : linePath(times, bright, xAtT, yAt);
+  const area = bars ? "" : areaPath(times, bright, xAtT, yAt, pad.t + innerH);
   const barW = bars ? barWidth(times, span, innerW) : 0;
 
   return (
@@ -174,6 +186,17 @@ export function NodeMetricLineChart({
               />
             );
           })}
+        {dimPath && (
+          <path
+            d={dimPath}
+            fill="none"
+            stroke={MUTED}
+            strokeWidth="1.4"
+            strokeDasharray="3 3"
+            strokeLinejoin="round"
+            opacity="0.7"
+          />
+        )}
         {area && <path d={area} fill={color} opacity="0.12" />}
         {path && (
           <path d={path} fill="none" stroke={color} strokeWidth="1.8" strokeLinejoin="round" />
@@ -211,6 +234,7 @@ export function NodeMetricLineChart({
           <div className="tabular-nums text-[var(--text)]">
             {values[hover.i] == null ? "—" : `${formatY(values[hover.i] as number)} ${unit}`}
           </div>
+          {dim?.[hover.i] && <div className="text-[var(--muted)]">{dimLabel}</div>}
         </div>
       )}
       {nums.length < 2 && (

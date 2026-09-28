@@ -125,10 +125,20 @@ export type MetricPoint = {
   net_tx_bps: number | null;
   users_online: number | null;
   capacity: number | null;
-  /** Суммы дельт TCP за шаг; retr_pct = retrans / out · 100. Null на агентах < 0.1.21. */
+  /**
+   * Суммы дельт TCP за шаг. С агента 0.1.22 retr_pct = (retrans − syn) / orig_data · 100,
+   * на старых — retrans / out · 100. Null на агентах < 0.1.21.
+   */
   tcp_out_segs?: number | null;
   tcp_retrans_segs?: number | null;
+  /** TcpExt TCPSynRetrans / TCPOrigDataSent за шаг. Null на агентах < 0.1.22. */
+  tcp_syn_retrans?: number | null;
+  tcp_orig_data_sent?: number | null;
+  /** Числитель новой формулы за шаг: ретрансмиты без SYN, только по отсчётам с новыми полями. */
+  tcp_retrans_no_syn?: number | null;
   retr_pct?: number | null;
+  /** Сегментов с данными за шаг меньше порога: цифру показываем серой, «мало трафика». */
+  retr_low_volume?: boolean | null;
   /** Сколько процессов убил OOM-killer за шаг. */
   oom_kills?: number | null;
   swap_percent?: number | null;

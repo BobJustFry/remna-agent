@@ -202,10 +202,20 @@ class MetricPointOut(BaseModel):
     net_tx_bps: int | None = None
     users_online: float | None = None
     capacity: int | None = None
-    # Сегменты и ретрансмиты — суммы дельт за шаг; retr_pct = retrans / out * 100.
+    # Сегменты и ретрансмиты — суммы дельт за шаг. С агента 0.1.22
+    # retr_pct = (retrans − syn_retrans) / orig_data_sent * 100, на старых —
+    # retrans / out * 100.
     tcp_out_segs: int | None = None
     tcp_retrans_segs: int | None = None
+    tcp_syn_retrans: int | None = None
+    tcp_orig_data_sent: int | None = None
+    # Числитель новой формулы за шаг (ретрансмиты без SYN, только по отсчётам с
+    # новыми полями) — чтобы фронт честно сложил долю за весь период.
+    tcp_retrans_no_syn: int | None = None
     retr_pct: float | None = None
+    # Сегментов с данными за шаг меньше порога — долю показываем, но не тревожим.
+    # Null — старая формула, объём по ней не оценивается.
+    retr_low_volume: bool | None = None
     # Сколько процессов убил OOM-killer за шаг.
     oom_kills: int | None = None
     swap_percent: float | None = None

@@ -107,6 +107,11 @@ class NodeMetricSample(Base):
     # перезагрузки ноды. Null — старый агент, первый тик или счётчик сбросился.
     tcp_out_segs: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     tcp_retrans_segs: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # TcpExt TCPSynRetrans / TCPOrigDataSent — тоже дельты, с агента 0.1.22. По ним
+    # retr_pct = (retrans − syn) / orig_data: без повторов SYN-ACK сканерам и без
+    # чистых ACK в знаменателе. Null — старый агент, считаем по старой формуле.
+    tcp_syn_retrans: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tcp_orig_data_sent: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     oom_kills: Mapped[int | None] = mapped_column(Integer, nullable=True)
     swap_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Пинг и потери до якорей RIPE Atlas в Москве, как их видит сама нода.

@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "0.1.21"
+VERSION = "0.1.22"
 STARTED_AT = time.time()
 _LAST_CPU = None
 _VIRT_CACHE: tuple[str | None] | None = None
@@ -1110,6 +1110,32 @@ def tcp_counters() -> dict:
         return empty
 
 
+def tcp_ext_counters() -> dict:
+    """Накопительные счётчики TcpExt из /proc/net/netstat: TCPSynRetrans и TCPOrigDataSent.
+
+    RetransSegs / OutSegs врёт на тихих нодах: в числитель попадают повторы
+    SYN-ACK сканерам и SYN в мёртвые адреса, а в знаменатель — чистые ACK. Эти
+    два счётчика дают панели честную долю: (RetransSegs − TCPSynRetrans) /
+    TCPOrigDataSent — повторы на сегмент с данными. Как и OutSegs, отдаём сырыми.
+    """
+    empty = {"tcp_syn_retrans_total": None, "tcp_orig_data_sent_total": None}
+    try:
+        with open("/proc/net/netstat", encoding="utf-8") as f:
+            rows = [line.split() for line in f if line.startswith("TcpExt:")]
+        # Как и в snmp: первая строка «TcpExt:» — имена полей, вторая — значения.
+        if len(rows) < 2:
+            return empty
+        fields = dict(zip(rows[0][1:], rows[1][1:]))
+        syn = fields.get("TCPSynRetrans")
+        orig = fields.get("TCPOrigDataSent")
+        return {
+            "tcp_syn_retrans_total": int(syn) if syn is not None else None,
+            "tcp_orig_data_sent_total": int(orig) if orig is not None else None,
+        }
+    except Exception:
+        return empty
+
+
 def oom_kill_total() -> int | None:
     """Сколько процессов убил OOM-killer с загрузки (/proc/vmstat, ядро ≥ 4.13)."""
     try:
@@ -1280,6 +1306,7 @@ def collect_metrics() -> dict:
         **net_info(),
         **swap_stats(),
         **tcp_counters(),
+        **tcp_ext_counters(),
         "oom_kill_total": oom_kill_total(),
         "boot_id": boot_id(),
         **ru_ping_info(),

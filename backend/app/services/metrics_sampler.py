@@ -13,11 +13,10 @@ from app.models import Node
 from app.services.agent_metrics import fetch_agent_status
 from app.services.counter_delta import CounterSnapshot, CounterTracker
 from app.services.crypto import decrypt_secret
-from app.services.metrics_store import insert_samples, prune_old
+from app.services.metrics_store import SAMPLE_INTERVAL_SEC, insert_samples, prune_old
 
 log = logging.getLogger("remna.metrics")
 
-SAMPLE_INTERVAL_SEC = 30.0
 _PRUNE_EVERY = 40
 # Прошлые значения счётчиков TCP/OOM по нодам — для дельт между тиками.
 _counters = CounterTracker()
@@ -31,6 +30,8 @@ def _snapshot(ag: object | None) -> CounterSnapshot | None:
         tcp_out=getattr(ag, "tcp_out_segs_total", None),
         tcp_retrans=getattr(ag, "tcp_retrans_segs_total", None),
         oom_kill=getattr(ag, "oom_kill_total", None),
+        tcp_syn_retrans=getattr(ag, "tcp_syn_retrans_total", None),
+        tcp_orig_data=getattr(ag, "tcp_orig_data_sent_total", None),
     )
 
 

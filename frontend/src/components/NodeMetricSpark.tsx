@@ -12,6 +12,11 @@ type Props = {
    */
   refY?: number;
   refColor?: string;
+  /**
+   * Точки, которым верить рано (ретрансмиты при малом трафике): рисуются серым,
+   * цветом — только отрезки между «настоящими» точками.
+   */
+  dim?: Array<boolean>;
 };
 
 export function NodeMetricSpark({
@@ -23,6 +28,7 @@ export function NodeMetricSpark({
   toTs,
   refY,
   refColor,
+  dim,
 }: Props) {
   const nums = values.filter((v): v is number => v != null && Number.isFinite(v));
   if (nums.length < 1) {
@@ -43,19 +49,34 @@ export function NodeMetricSpark({
   const refYPos = refY != null && refY > 0 ? h - 1.5 - (Math.min(refY, max) / max) * (h - 3) : null;
   const refClamped = refY != null && refY > max;
   const pts: string[] = [];
+  // Цветные отрезки: подряд идущие точки без пометки dim.
+  const runs: string[][] = [];
+  let run: string[] = [];
   let last = nums[nums.length - 1];
   let lastT = toTs;
+  let lastDim = false;
   values.forEach((v, i) => {
     const t = times[i];
     if (v == null || !Number.isFinite(v) || t == null) return;
     const x = 1 + ((t - fromTs) / span) * (w - 2);
     const y = h - 1.5 - (v / max) * (h - 3);
-    pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    const pt = `${x.toFixed(1)},${y.toFixed(1)}`;
+    pts.push(pt);
+    const isDim = !!dim?.[i];
+    if (isDim) {
+      if (run.length) runs.push(run);
+      run = [];
+    } else {
+      run.push(pt);
+    }
     last = v;
     lastT = t;
+    lastDim = isDim;
   });
+  if (run.length) runs.push(run);
   const lastX = 1 + ((lastT - fromTs) / span) * (w - 2);
   const lastY = h - 1.5 - (last / max) * (h - 3);
+  const hasDim = !!dim?.some(Boolean);
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className="block h-full w-full" preserveAspectRatio="none" aria-hidden>
       {refYPos != null && (
@@ -73,14 +94,36 @@ export function NodeMetricSpark({
       )}
       <polyline
         fill="none"
-        stroke={color}
-        strokeWidth="1.6"
+        stroke={hasDim ? "var(--muted)" : color}
+        strokeWidth={hasDim ? "1.2" : "1.6"}
         strokeLinejoin="round"
         strokeLinecap="round"
         vectorEffect="non-scaling-stroke"
+        opacity={hasDim ? 0.6 : 1}
         points={pts.join(" ")}
       />
-      <circle cx={lastX} cy={lastY} r="1.8" fill={color} vectorEffect="non-scaling-stroke" />
+      {hasDim &&
+        runs.map((r, i) =>
+          r.length > 1 ? (
+            <polyline
+              key={i}
+              fill="none"
+              stroke={color}
+              strokeWidth="1.6"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+              points={r.join(" ")}
+            />
+          ) : null,
+        )}
+      <circle
+        cx={lastX}
+        cy={lastY}
+        r="1.8"
+        fill={lastDim ? "var(--muted)" : color}
+        vectorEffect="non-scaling-stroke"
+      />
     </svg>
   );
 }

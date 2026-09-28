@@ -68,6 +68,10 @@ class AgentStatus:
     tcp_retrans_segs_total: int | None = None
     oom_kill_total: int | None = None
     boot_id: str | None = None
+    # TcpExt TCPSynRetrans / TCPOrigDataSent — с агента 0.1.22: по ним доля
+    # ретрансмитов без повторов SYN и на сегмент с данными, а не на все OutSegs.
+    tcp_syn_retrans_total: int | None = None
+    tcp_orig_data_sent_total: int | None = None
     error: str | None = None
 
 
@@ -237,6 +241,8 @@ async def _probe_once(
             tcp_retrans_segs_total=_as_int(data.get("tcp_retrans_segs_total")),
             oom_kill_total=_as_int(data.get("oom_kill_total")),
             boot_id=_as_str(data.get("boot_id")),
+            tcp_syn_retrans_total=_as_int(data.get("tcp_syn_retrans_total")),
+            tcp_orig_data_sent_total=_as_int(data.get("tcp_orig_data_sent_total")),
             error=None,
         )
 

@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # Куда агент на ноде пингует «до России»: якоря RIPE Atlas в Москве
     # (Yandex, RASCOM). Уезжает в /etc/remna-agent.env при установке агента.
     agent_ru_ping_targets: str = "185.32.187.161,81.27.254.54"
+    # Порог объёма для доли ретрансмитов: сегментов с данными (TCPOrigDataSent)
+    # за 5 минут. Меньше — точка помечается «мало данных» и не красится.
+    # Для других шагов графика пересчитывается пропорционально времени.
+    retr_min_data_segs_5min: int = 20000
 
     @model_validator(mode="after")
     def apply_production_defaults(self) -> "Settings":
