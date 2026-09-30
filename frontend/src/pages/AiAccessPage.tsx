@@ -6,6 +6,8 @@ import {
   type AiChange,
   type AiHostHistory,
   type AiHostRow,
+  type AiHostState,
+  type AiRun,
   type AiVerdict,
 } from "../api/client";
 import { CountryFlag } from "../components/CountryFlag";
@@ -14,6 +16,10 @@ const INPUT =
   "w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]";
 const BTN =
   "rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--text)] hover:bg-[var(--bg-row)] disabled:opacity-50";
+
+// Таблица с раздельными границами: со схлопнутыми липкая шапка теряет линии.
+const TH = "sticky top-0 bg-[var(--bg-elevated)] py-2 font-medium shadow-[0_1px_0_var(--border)]";
+const ROW_LINE = "border-t border-[var(--border)]";
 
 // Пока идёт прогон — подтягиваем прогресс часто, в покое хватит раза в минуту.
 const POLL_RUNNING_MS = 5_000;
@@ -75,12 +81,21 @@ function fmtDuration(from: string, to: string | null) {
   return s < 90 ? `${s} с` : `${Math.round(s / 60)} мин`;
 }
 
+/** Хост ещё в работе: ждёт очереди, проверяется или выходит из проверки. */
+function isBusy(state: AiHostState | null): boolean {
+  return state === "queued" || state === "running" || state === "cancelling";
+}
+
 /**
  * Доступ к ИИ через каждый хост подписки.
  *
  * Значок 🧠 в имени хоста — обещание клиенту. Держится оно на WARP и правилах
  * маршрутизации ноды, и ломается молча: клиент просто уходит с хоста. Здесь
  * видно, что обещание выполняется, и что поменялось с прошлого прогона.
+ *
+ * Проверить можно весь парк, отмеченные хосты или один. Кто в очереди и кто
+ * проверяется, знает сервер: страница только рисует то, что пришло в статусе,
+ * поэтому спиннеры и кнопки отмены переживают обновление окна.
  */
 export function AiAccessPage() {
   const [status, setStatus] = useState<AiAccessStatus | null>(null);
@@ -88,6 +103,10 @@ export function AiAccessPage() {
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState<"all" | "problems" | "changed">("all");
   const [open, setOpen] = useState<string | null>(null);
+  // Отметки — дело этой вкладки; сам прогон и его очередь живут на сервере.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Хосты, по которым запрос ещё в пути: чтобы кнопку не нажали дважды.
+  const [sending, setSending] = useState<Set<string>>(new Set());
   const timer = useRef<number | null>(null);
 
   const load = useCallback(async () => {
@@ -116,16 +135,45 @@ export function AiAccessPage() {
     };
   }, [running, load]);
 
-  async function runNow() {
-    setBusy(true);
+  /** Запрос, который возвращает свежий статус: запуск или отмена. */
+  async function send(call: () => Promise<AiAccessStatus>, keys: string[], fail: string) {
     setMsg(null);
+    if (keys.length) setSending((prev) => new Set([...prev, ...keys]));
     try {
-      setStatus(await api.aiAccessRun());
+      setStatus(await call());
     } catch (err) {
-      setMsg(err instanceof Error ? err.message : "Не запустилось");
+      setMsg(err instanceof Error ? err.message : fail);
     } finally {
-      setBusy(false);
+      if (keys.length)
+        setSending((prev) => {
+          const next = new Set(prev);
+          for (const k of keys) next.delete(k);
+          return next;
+        });
     }
+  }
+
+  async function runAll() {
+    setBusy(true);
+    await send(() => api.aiAccessRun(), [], "Не запустилось");
+    setBusy(false);
+  }
+
+  async function cancelAll() {
+    setBusy(true);
+    await send(() => api.aiAccessCancel(), [], "Не отменилось");
+    setBusy(false);
+  }
+
+  const runHosts = (keys: string[]) => send(() => api.aiAccessRun(keys), keys, "Не запустилось");
+  const cancelHosts = (keys: string[]) => send(() => api.aiAccessCancel(keys), keys, "Не отменилось");
+
+  function toggle(key: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
   }
 
   const rows = useMemo(() => {
@@ -153,176 +201,310 @@ export function AiAccessPage() {
     );
   }
 
-  const { shown, last, services } = status;
+  const { shown, last, services, last_partial: lastPartial } = status;
+  const run = status.running;
   const failed = last && (last.status === "failed" || last.status === "aborted") ? last : null;
   const changedCount = status.rows.filter((r) => r.changed).length;
+  const canRun = status.config.sub_configured;
+
+  // Отмеченные, которые ещё есть в матрице и не заняты прогоном.
+  const picked = status.rows.filter((r) => selected.has(r.host_key) && !isBusy(r.state));
+  const pickable = rows.filter((r) => !isBusy(r.state));
+  const allPicked = pickable.length > 0 && pickable.every((r) => selected.has(r.host_key));
+
+  // Последняя выборочная проверка что-то не смогла — говорим, пока её не
+  // перекрыл следующий прогон.
+  const partialNote =
+    lastPartial && !run && (!last || new Date(lastPartial.started_at) > new Date(last.started_at))
+      ? lastPartial
+      : null;
+  const partialMissing = partialNote ? partialNote.hosts.filter((h) => h.state === "missing") : [];
+  const partialFailed =
+    partialNote && partialMissing.length === 0 &&
+    (partialNote.status === "failed" || partialNote.status === "aborted")
+      ? partialNote
+      : null;
+
+  const fullActive = run?.scope === "full";
+  const fullLabel = fullActive
+    ? "Идёт прогон…"
+    : status.pending_full
+      ? "Полный — в очереди"
+      : busy
+        ? "Запускаю…"
+        : "Проверить всё";
+  const fullTitle = fullActive
+    ? "Полный прогон уже идёт"
+    : status.pending_full
+      ? "Полный прогон начнётся, как только закончится выборочная проверка"
+      : run
+        ? "Полный прогон встанет следом за выборочной проверкой"
+        : "Проверить все хосты подписки";
 
   return (
-    <div className="mx-auto max-w-[1600px] space-y-4 p-4 sm:p-6">
-      <header className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h1 className="text-xl font-semibold tracking-tight">ИИ-доступ</h1>
-          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-[var(--muted)]">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <header className="border-b border-[var(--border)] px-4 py-3 sm:px-6 sm:py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="hidden text-xl font-semibold tracking-tight lg:block">ИИ-доступ</h1>
+            <p className="text-sm text-[var(--muted)] lg:mt-0.5">
+              Открываются ли ChatGPT, Claude и Gemini через каждый хост подписки.
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {run && (
+              <button
+                type="button"
+                disabled={busy || run.stopping}
+                onClick={() => void cancelAll()}
+                title="Остановить прогон: проверенные хосты сохранятся, остальные останутся с прежним результатом"
+                className="rounded-lg border border-[rgba(240,113,120,0.45)] px-3 py-1.5 text-sm text-[var(--danger)] hover:bg-[rgba(240,113,120,0.10)] disabled:opacity-50"
+              >
+                {run.stopping ? "Отменяется…" : "Отменить прогон"}
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={busy || fullActive || Boolean(status.pending_full) || !canRun}
+              onClick={() => void runAll()}
+              title={fullTitle}
+              className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[#062a25] hover:opacity-90 disabled:opacity-50"
+            >
+              {fullLabel}
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <div className="flex-1 overflow-auto px-3 py-3 sm:px-6 sm:py-4">
+        <div className="mx-auto max-w-[1600px] space-y-4">
+          <p className="max-w-3xl text-xs leading-relaxed text-[var(--muted)]">
             Через каждый хост подписки поднимается отдельный клиент xray, и через него рагент
             открывает ChatGPT, Claude, Gemini и их API с отпечатком браузера. Вердикт — по
             признакам (редирект, JSON-ошибка, маркеры отказа), а не по коду ответа. Челлендж
             Cloudflare — не отказ по стране, а проверка на бота.
           </p>
-        </div>
-        <button
-          type="button"
-          disabled={busy || running || !status.config.sub_configured}
-          onClick={() => void runNow()}
-          className="shrink-0 rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-[#062a25] hover:opacity-90 disabled:opacity-50"
-        >
-          {running ? "Идёт прогон…" : busy ? "Запускаю…" : "Проверить сейчас"}
-        </button>
-      </header>
 
-      {msg && (
-        <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-row)] px-3 py-2 text-sm">
-          {msg}
-        </div>
-      )}
-
-      <section className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] px-4 py-3 text-sm">
-        {status.running ? (
-          <RunProgress done={status.running.hosts_done} total={status.running.hosts_total} />
-        ) : null}
-        <span>
-          <span className="text-[var(--muted)]">Прогон: </span>
-          {shown ? (
-            <>
-              <span className="tabular-nums">{fmtTime(shown.started_at)}</span>
-              <span className="text-[var(--muted)]">
-                {" "}
-                · {ago(shown.started_at)}
-                {shown.finished_at ? ` · ${fmtDuration(shown.started_at, shown.finished_at)}` : ""}
-                {` · ${shown.trigger === "manual" ? "вручную" : "по расписанию"}`}
-                {` · хостов ${status.rows.length}`}
-              </span>
-            </>
-          ) : (
-            <span className="text-[var(--muted)]">ещё не было</span>
-          )}
-        </span>
-        {status.prev && (
-          <span className="text-[var(--muted)]">
-            сравнение с {fmtTime(status.prev.started_at)} ·{" "}
-            <span className={changedCount ? "text-[var(--accent)]" : ""}>
-              изменилось хостов: {changedCount}
-            </span>
-          </span>
-        )}
-        <span className="text-[var(--muted)]">
-          {status.config.enabled
-            ? `Следующий: ${status.next_run_at ? fmtTime(status.next_run_at) : "после текущего"} · раз в ${status.config.interval_hours} ч`
-            : "Расписание выключено"}
-        </span>
-      </section>
-
-      {failed && (
-        <div className="rounded-lg border border-[rgba(240,113,120,0.45)] bg-[rgba(240,113,120,0.10)] px-3 py-2 text-sm">
-          Прогон {fmtTime(failed.started_at)} {failed.status === "aborted" ? "прерван" : "упал"}:{" "}
-          {failed.error ?? "без подробностей"}
-        </div>
-      )}
-
-      {!status.config.sub_configured && (
-        <div className="rounded-lg border border-[rgba(230,162,60,0.45)] bg-[rgba(230,162,60,0.10)] px-3 py-2 text-sm">
-          Не задан адрес подписки — ни здесь в настройках, ни в следилке за подпиской.
-        </div>
-      )}
-
-      {shown && shown.changes.length > 0 && <ChangesList changes={shown.changes} services={services} />}
-
-      {status.rows.length > 0 && (
-        <section className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)]">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-2.5">
-            <Legend />
-            <div className="flex gap-1 text-xs">
-              {(
-                [
-                  ["all", "все"],
-                  ["problems", "с проблемами"],
-                  ["changed", "изменились"],
-                ] as const
-              ).map(([k, label]) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => setFilter(k)}
-                  className={`rounded-md border px-2 py-1 ${
-                    filter === k
-                      ? "border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--accent)]"
-                      : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--text)]"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
+          {msg && (
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-row)] px-3 py-2 text-sm">
+              {msg}
             </div>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-sm">
-              <thead>
-                <tr className="text-left text-xs text-[var(--muted)]">
-                  <th className="sticky left-0 z-10 bg-[var(--bg-elevated)] px-3 py-2 font-medium">Хост</th>
-                  <th className="px-3 py-2 font-medium">Выход ноды</th>
-                  <th className="px-3 py-2 font-medium">Выход ИИ</th>
-                  {services.map((s) => (
-                    <th key={s.key} className="px-2 py-2 text-center font-medium">
-                      <div>{s.name}</div>
-                      <div className="mt-0.5 font-normal tabular-nums">
-                        <span className="text-[var(--success)]">{counts[s.key]?.ok ?? 0}</span>
-                        <span className="opacity-60"> / {status.rows.length}</span>
-                      </div>
-                    </th>
+          )}
+
+          <section className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] px-4 py-3 text-sm">
+            {run ? <RunProgress run={run} pendingFull={status.pending_full} /> : null}
+            <span>
+              <span className="text-[var(--muted)]">Полный прогон: </span>
+              {shown ? (
+                <>
+                  <span className="tabular-nums">{fmtTime(shown.started_at)}</span>
+                  <span className="text-[var(--muted)]">
+                    {" "}
+                    · {ago(shown.started_at)}
+                    {shown.finished_at ? ` · ${fmtDuration(shown.started_at, shown.finished_at)}` : ""}
+                    {` · ${shown.trigger === "manual" ? "вручную" : "по расписанию"}`}
+                    {` · хостов ${status.rows.length}`}
+                  </span>
+                </>
+              ) : (
+                <span className="text-[var(--muted)]">ещё не было</span>
+              )}
+            </span>
+            {status.prev && (
+              <span className="text-[var(--muted)]">
+                сравнение с {fmtTime(status.prev.started_at)} ·{" "}
+                <span className={changedCount ? "text-[var(--accent)]" : ""}>
+                  изменилось хостов: {changedCount}
+                </span>
+              </span>
+            )}
+            {last?.status === "cancelled" && !fullActive && (
+              <span className="text-[var(--muted)]">
+                прогон {fmtTime(last.started_at)} отменён · успел проверить {last.hosts_done}
+              </span>
+            )}
+            <span className="text-[var(--muted)]">
+              {status.config.enabled
+                ? `Следующий:${status.next_run_at ? fmtTime(status.next_run_at) : "после текущего"} · раз в ${status.config.interval_hours} ч`
+                : "Расписание выключено"}
+            </span>
+          </section>
+
+          {failed && (
+            <div className="rounded-lg border border-[rgba(240,113,120,0.45)] bg-[rgba(240,113,120,0.10)] px-3 py-2 text-sm">
+              Прогон {fmtTime(failed.started_at)} {failed.status === "aborted" ? "прерван" : "упал"}:{" "}
+              {failed.error ?? "без подробностей"}
+            </div>
+          )}
+
+          {partialMissing.length > 0 && partialNote && (
+            <div className="rounded-lg border border-[rgba(230,162,60,0.45)] bg-[rgba(230,162,60,0.10)] px-3 py-2 text-sm">
+              Выборочная проверка {fmtTime(partialNote.started_at)}: не проверен{" "}
+              {partialMissing.map((h) => h.host).join(", ")} —{" "}
+              {partialMissing[0].error ?? "хоста нет в подписке"}.
+            </div>
+          )}
+          {partialFailed && (
+            <div className="rounded-lg border border-[rgba(240,113,120,0.45)] bg-[rgba(240,113,120,0.10)] px-3 py-2 text-sm">
+              Выборочная проверка {fmtTime(partialFailed.started_at)}{" "}
+              {partialFailed.status === "aborted" ? "прервана" : "упала"}:{" "}
+              {partialFailed.error ?? "без подробностей"}
+            </div>
+          )}
+
+          {!canRun && (
+            <div className="rounded-lg border border-[rgba(230,162,60,0.45)] bg-[rgba(230,162,60,0.10)] px-3 py-2 text-sm">
+              Не задан адрес подписки — ни здесь в настройках, ни в следилке за подпиской.
+            </div>
+          )}
+
+          {shown && shown.changes.length > 0 && <ChangesList changes={shown.changes} services={services} />}
+
+          {status.rows.length > 0 && (
+            <section className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)]">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-[var(--border)] px-4 py-2.5">
+                <Legend />
+                <div className="flex flex-wrap items-center gap-1 text-xs">
+                  {picked.length > 0 && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={!canRun}
+                        onClick={() => {
+                          void runHosts(picked.map((r) => r.host_key));
+                          setSelected(new Set());
+                        }}
+                        title="Проверить только отмеченные хосты. Если прогон уже идёт, они встанут в его очередь"
+                        className="rounded-md border border-[var(--accent)] bg-[var(--accent-dim)] px-2 py-1 font-medium text-[var(--accent)] hover:brightness-110 disabled:opacity-50"
+                      >
+                        Проверить выбранные ({picked.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelected(new Set())}
+                        title="Снять все отметки"
+                        className="mr-2 rounded-md border border-[var(--border)] px-2 py-1 text-[var(--muted)] hover:text-[var(--text)]"
+                      >
+                        снять
+                      </button>
+                    </>
+                  )}
+                  {(
+                    [
+                      ["all", "все"],
+                      ["problems", "с проблемами"],
+                      ["changed", "изменились"],
+                    ] as const
+                  ).map(([k, label]) => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => setFilter(k)}
+                      className={`rounded-md border px-2 py-1 ${
+                        filter === k
+                          ? "border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--accent)]"
+                          : "border-[var(--border)] text-[var(--muted)] hover:text-[var(--text)]"
+                      }`}
+                    >
+                      {label}
+                    </button>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => (
-                  <Fragment key={r.host_key}>
-                    <HostRow
-                      row={r}
-                      services={services}
-                      expanded={open === r.host_key}
-                      onToggle={() => setOpen(open === r.host_key ? null : r.host_key)}
-                    />
-                    {open === r.host_key && (
+                </div>
+              </div>
+              {/* Свой скролл в обе стороны: иначе шапка таблицы не прилипает —
+                  горизонтальная прокрутка матрицы отрезает её от прокрутки страницы. */}
+              <div className="max-h-[calc(100dvh-11rem)] overflow-auto overscroll-x-contain rounded-b-[var(--radius)]">
+                <table className="w-full border-separate border-spacing-0 text-sm">
+                  <thead>
+                    <tr className="text-left text-xs text-[var(--muted)]">
+                      <th className={`${TH} left-0 z-30 px-3`}>
+                        <span className="flex items-center gap-1.5">
+                          <input
+                            type="checkbox"
+                            checked={allPicked}
+                            disabled={pickable.length === 0}
+                            onChange={() =>
+                              setSelected((prev) => {
+                                const next = new Set(prev);
+                                for (const r of pickable)
+                                  if (allPicked) next.delete(r.host_key);
+                                  else next.add(r.host_key);
+                                return next;
+                              })
+                            }
+                            title={allPicked ? "Снять отметки" : "Отметить все хосты в списке"}
+                            aria-label="Отметить все хосты в списке"
+                            className="h-3.5 w-3.5 shrink-0 accent-[var(--accent)]"
+                          />
+                          Хост
+                        </span>
+                      </th>
+                      <th className={`${TH} z-20 px-3`}>Выход ноды</th>
+                      <th className={`${TH} z-20 px-3`}>Выход ИИ</th>
+                      {services.map((s) => (
+                        <th key={s.key} className={`${TH} z-20 px-2 text-center`}>
+                          <div>{s.name}</div>
+                          <div className="mt-0.5 font-normal tabular-nums">
+                            <span className="text-[var(--success)]">{counts[s.key]?.ok ?? 0}</span>
+                            <span className="opacity-60"> / {status.rows.length}</span>
+                          </div>
+                        </th>
+                      ))}
+                      <th className={`${TH} z-20 px-3`}>Проверен</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r) => (
+                      <Fragment key={r.host_key}>
+                        <HostRow
+                          row={r}
+                          services={services}
+                          expanded={open === r.host_key}
+                          onToggle={() => setOpen(open === r.host_key ? null : r.host_key)}
+                          picked={selected.has(r.host_key)}
+                          onPick={() => toggle(r.host_key)}
+                          sending={sending.has(r.host_key)}
+                          canRun={canRun}
+                          onRun={() => void runHosts([r.host_key])}
+                          onCancel={() => void cancelHosts([r.host_key])}
+                        />
+                        {open === r.host_key && (
+                          <tr>
+                            <td colSpan={4 + services.length} className={`${ROW_LINE} bg-[var(--bg)] px-4 py-3`}>
+                              <HostHistory hostKey={r.host_key} services={services} />
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    ))}
+                    {rows.length === 0 && (
                       <tr>
-                        <td colSpan={3 + services.length} className="border-t border-[var(--border)] bg-[var(--bg)] px-4 py-3">
-                          <HostHistory hostKey={r.host_key} services={services} />
+                        <td colSpan={4 + services.length} className="px-4 py-6 text-center text-sm text-[var(--muted)]">
+                          Под фильтр ничего не попало
                         </td>
                       </tr>
                     )}
-                  </Fragment>
-                ))}
-                {rows.length === 0 && (
-                  <tr>
-                    <td colSpan={3 + services.length} className="px-4 py-6 text-center text-sm text-[var(--muted)]">
-                      Под фильтр ничего не попало
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
 
-      <AiAccessSettings status={status} onSaved={setStatus} />
+          <AiAccessSettings status={status} onSaved={setStatus} />
+        </div>
+      </div>
     </div>
   );
 }
 
-function RunProgress({ done, total }: { done: number; total: number | null }) {
+function RunProgress({ run, pendingFull }: { run: AiRun; pendingFull: AiAccessStatus["pending_full"] }) {
+  const { hosts_done: done, hosts_total: total } = run;
   const pct = total ? Math.round((100 * done) / total) : 0;
+  const label = run.stopping ? "Отменяется" : run.scope === "partial" ? "Проверка выбранных" : "Идёт прогон";
   return (
-    <span className="flex items-center gap-2">
+    <span className="flex flex-wrap items-center gap-2">
       <span className="h-2 w-2 animate-pulse rounded-full bg-[var(--accent)]" aria-hidden />
-      <span>Идёт прогон</span>
+      <span>{label}</span>
       <span className="tabular-nums text-[var(--muted)]">
         {total ? `${done} / ${total}` : "забираю подписку…"}
       </span>
@@ -331,6 +513,11 @@ function RunProgress({ done, total }: { done: number; total: number | null }) {
           <span className="block h-full bg-[var(--accent)]" style={{ width: `${pct}%` }} />
         </span>
       ) : null}
+      {pendingFull && (
+        <span className="text-[var(--muted)]">
+          · следом полный прогон{pendingFull === "schedule" ? " по расписанию" : ""}
+        </span>
+      )}
     </span>
   );
 }
@@ -346,7 +533,7 @@ function Legend() {
       ))}
       <span className="flex items-center gap-1.5">
         <span className="h-2.5 w-2.5 rounded-sm ring-2 ring-[var(--accent)]" />
-        изменилось с прошлого прогона
+        изменилось с прошлой проверки
       </span>
     </div>
   );
@@ -421,51 +608,190 @@ function Cell({ cell }: { cell: AiCell | undefined }) {
   );
 }
 
+/** Кольцо-спиннер во всю кнопку: яркое — хост проверяется, тусклое и медленное — ждёт. */
+function Ring({ muted }: { muted?: boolean }) {
+  return (
+    <svg
+      className={`absolute inset-0 h-full w-full animate-spin ${
+        muted ? "text-[var(--muted)] [animation-duration:2.4s]" : "text-[var(--accent)]"
+      }`}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="10.5" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
+      <path d="M12 1.5A10.5 10.5 0 0 1 22.5 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+const ICON_BTN =
+  "relative inline-flex h-7 w-7 shrink-0 items-center justify-center text-[var(--muted)] disabled:opacity-40";
+
+/**
+ * Кнопка хоста: запустить проверку, а пока он в прогоне — спиннер с крестиком
+ * отмены внутри. Один значок вместо двух: в узкой колонке место нужно имени.
+ */
+function RowAction({
+  state,
+  sending,
+  canRun,
+  onRun,
+  onCancel,
+}: {
+  state: AiHostState | null;
+  sending: boolean;
+  canRun: boolean;
+  onRun: () => void;
+  onCancel: () => void;
+}) {
+  if (state === "cancelling")
+    return (
+      <span className={ICON_BTN} title="Отменяется…" aria-label="Отменяется…">
+        <Ring muted />
+      </span>
+    );
+  if (state === "queued" || state === "running") {
+    const queued = state === "queued";
+    const title = queued
+      ? "В очереди. Нажмите, чтобы убрать из очереди"
+      : "Проверяется. Нажмите, чтобы прервать — останется прежний результат";
+    return (
+      <button
+        type="button"
+        disabled={sending}
+        onClick={(e) => {
+          e.stopPropagation();
+          onCancel();
+        }}
+        title={title}
+        aria-label={title}
+        className={`${ICON_BTN} rounded-full hover:text-[var(--danger)]`}
+      >
+        <Ring muted={queued} />
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" aria-hidden>
+          <path d="M6 6l12 12M18 6L6 18" />
+        </svg>
+      </button>
+    );
+  }
+  return (
+    <button
+      type="button"
+      disabled={sending || !canRun}
+      onClick={(e) => {
+        e.stopPropagation();
+        onRun();
+      }}
+      title="Проверить этот хост"
+      aria-label="Проверить этот хост"
+      className={`${ICON_BTN} rounded-md border border-[var(--border)] hover:border-[var(--accent)] hover:text-[var(--accent)]`}
+    >
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <path d="M7 4.5v15a1 1 0 0 0 1.5.86l13-7.5a1 1 0 0 0 0-1.72l-13-7.5A1 1 0 0 0 7 4.5z" />
+      </svg>
+    </button>
+  );
+}
+
 function HostRow({
   row,
   services,
   expanded,
   onToggle,
+  picked,
+  onPick,
+  sending,
+  canRun,
+  onRun,
+  onCancel,
 }: {
   row: AiHostRow;
   services: { key: string; name: string }[];
   expanded: boolean;
   onToggle: () => void;
+  picked: boolean;
+  onPick: () => void;
+  sending: boolean;
+  canRun: boolean;
+  onRun: () => void;
+  onCancel: () => void;
 }) {
+  const busy = isBusy(row.state);
+  const checked = Boolean(row.checked_at);   // ни разу не проверенному показывать нечего
   return (
     <tr
-      onClick={onToggle}
-      className={`cursor-pointer border-t border-[var(--border)] hover:bg-[var(--bg-row-hover)] ${
+      onClick={checked ? onToggle : undefined}
+      className={`hover:bg-[var(--bg-row-hover)] ${checked ? "cursor-pointer" : ""} ${
         row.changed ? "bg-[rgba(34,211,187,0.04)]" : ""
       }`}
     >
-      <td className="sticky left-0 z-10 max-w-[260px] bg-[var(--bg-elevated)] px-3 py-1.5">
+      <td className={`${ROW_LINE} sticky left-0 z-10 max-w-[210px] bg-[var(--bg-elevated)] px-3 py-1.5 sm:max-w-[260px]`}>
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-[var(--muted)]">{expanded ? "▾" : "▸"}</span>
-          <span className="truncate" title={row.host}>
+          <input
+            type="checkbox"
+            checked={picked && !busy}
+            disabled={busy}
+            onChange={onPick}
+            onClick={(e) => e.stopPropagation()}
+            title={busy ? "Хост уже в прогоне" : "Отметить для выборочной проверки"}
+            aria-label={`Отметить ${row.host}`}
+            className="h-3.5 w-3.5 shrink-0 accent-[var(--accent)]"
+          />
+          <span className="w-2 shrink-0 text-[10px] text-[var(--muted)]">
+            {checked ? (expanded ? "▾" : "▸") : ""}
+          </span>
+          <span className="min-w-0 flex-1 truncate" title={row.host}>
             {row.host}
           </span>
           {row.is_new && (
             <span className="shrink-0 rounded bg-[var(--accent-dim)] px-1 text-[10px] text-[var(--accent)]">новый</span>
           )}
+          <RowAction state={row.state} sending={sending} canRun={canRun} onRun={onRun} onCancel={onCancel} />
         </div>
-        {row.tunnel !== "up" && (
-          <div className="mt-0.5 truncate text-[11px] text-[var(--danger)]" title={row.error ?? ""}>
+        {busy ? (
+          <div className={`mt-0.5 pl-[30px] text-[11px] ${row.state === "running" ? "text-[var(--accent)]" : "text-[var(--muted)]"}`}>
+            {row.state === "running" ? "проверяется…" : row.state === "queued" ? "в очереди" : "отменяется…"}
+          </div>
+        ) : row.state === "cancelled" ? (
+          <div className="mt-0.5 pl-[30px] text-[11px] text-[var(--muted)]" title="Проверку отменили — в строке прежний результат">
+            отменён, результат прежний
+          </div>
+        ) : row.run_error ? (
+          <div className="mt-0.5 truncate pl-[30px] text-[11px] text-[var(--warning)]" title={row.run_error}>
+            не проверен: {row.run_error}
+          </div>
+        ) : null}
+        {checked && row.tunnel !== "up" && (
+          <div className="mt-0.5 truncate pl-[30px] text-[11px] text-[var(--danger)]" title={row.error ?? ""}>
             {row.tunnel === "down" ? "туннель не поднялся" : row.error ?? "ошибка"}
           </div>
         )}
       </td>
-      <td className="px-3 py-1.5">
+      <td className={`${ROW_LINE} px-3 py-1.5`}>
         <Exit ip={row.exit_ip} cc={row.exit_country} />
       </td>
-      <td className="px-3 py-1.5">
+      <td className={`${ROW_LINE} px-3 py-1.5`}>
         <Exit ip={row.ai_ip} cc={row.ai_country} warp={row.ai_warp} prevCc={row.prev_ai_country} />
       </td>
       {services.map((s) => (
-        <td key={s.key} className="px-2 py-1.5 text-center">
+        <td key={s.key} className={`${ROW_LINE} px-2 py-1.5 text-center`}>
           <Cell cell={row.results[s.key]} />
         </td>
       ))}
+      <td className={`${ROW_LINE} whitespace-nowrap px-3 py-1.5 text-xs leading-tight text-[var(--muted)]`}>
+        <div title={row.checked_at ? fmtTime(row.checked_at) : "ещё не проверялся"}>
+          {row.checked_at ? ago(row.checked_at) : "—"}
+        </div>
+        {row.partial && (
+          <div
+            className="text-[10px] text-[var(--accent)]"
+            title="Проверен отдельно, после полного прогона; сравнение — с его же прошлым результатом"
+          >
+            отдельно
+          </div>
+        )}
+      </td>
     </tr>
   );
 }
@@ -498,7 +824,7 @@ function HostHistory({ hostKey, services }: { hostKey: string; services: { key: 
   return (
     <div className="space-y-2">
       <div className="text-xs text-[var(--muted)]">
-        История за {hist.days} дней · прогонов {hist.points.length} · старые слева, свежие справа
+        История за {hist.days} дней · проверок {hist.points.length} · старые слева, свежие справа
       </div>
       <div className="grid grid-cols-[max-content_1fr] items-center gap-x-3 gap-y-1.5">
         {services.map((s) => (
@@ -510,7 +836,7 @@ function HostHistory({ hostKey, services }: { hostKey: string; services: { key: 
                 const st = c ? verdictStyle(c.verdict) : null;
                 return (
                   <span
-                    key={p.run_id}
+                    key={`${p.run_id}-${p.checked_at}`}
                     title={`${fmtTime(p.checked_at)} — ${c ? `${st!.label}${c.note ? `: ${c.note}` : ""}` : "не проверялся"}`}
                     className={`inline-block h-3.5 w-2.5 rounded-sm ${st ? st.dot : "bg-[var(--bg-row)]"}`}
                   />

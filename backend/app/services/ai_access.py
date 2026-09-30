@@ -33,13 +33,14 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -482,6 +483,70 @@ class TunnelError(Exception):
     pass
 
 
+class ProbeCancelled(Exception):
+    """Проверку хоста отменили: результата нет, и записывать нечего."""
+
+
+class CancelToken:
+    """Флаг отмены для потока проверки и рубильник его процесса xray.
+
+    Проверка идёт в потоке и висит в блокирующих запросах до таймаута. Чтобы
+    отмена не ждала минуту, гасим xray: socks-порт закрывается, запрос падает
+    сразу, поток видит флаг и выходит через обычную уборку туннеля — процесс
+    добит, порт свободен, временный каталог удалён.
+    """
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._proc: subprocess.Popen | None = None
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+    def cancel(self) -> None:
+        self._event.set()
+        with self._lock:
+            proc = self._proc
+        if proc is not None:
+            _terminate(proc)
+
+    def attach(self, proc: subprocess.Popen) -> None:
+        with self._lock:
+            self._proc = proc
+        if self.cancelled:          # отменили, пока процесс запускался
+            _terminate(proc)
+
+    def detach(self) -> None:
+        with self._lock:
+            self._proc = None
+
+    def check(self) -> None:
+        if self.cancelled:
+            raise ProbeCancelled()
+
+    def wait(self, seconds: float) -> None:
+        self._event.wait(seconds)
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+    except OSError:     # процесс успел выйти сам
+        pass
+
+
+def _pause(seconds: float, cancel: CancelToken | None = None) -> None:
+    """Пауза между попытками. Отмена обрывает её сразу."""
+    if cancel is None:
+        time.sleep(seconds)
+        return
+    cancel.wait(seconds)
+    cancel.check()
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -497,16 +562,19 @@ def _log_tail(path: str, limit: int = 600) -> str:
 
 
 @contextmanager
-def xray_tunnel(outbounds: list[dict]) -> Iterator[str]:
+def xray_tunnel(outbounds: list[dict], cancel: CancelToken | None = None) -> Iterator[str]:
     """Поднять xray-клиент с socks на 127.0.0.1 и отдать адрес прокси.
 
     Каждому хосту — свой процесс, свой порт и свой временный каталог: упавший
     или зависший клиент одного хоста не влияет на соседние, а после выхода из
-    блока от него не остаётся ни процесса, ни файлов.
+    блока от него не остаётся ни процесса, ни файлов. Так же уходит и отменённая
+    проверка: `cancel` гасит процесс, остальное делает уборка ниже.
     """
     binary = shutil.which(XRAY_BIN) or (XRAY_BIN if os.path.isfile(XRAY_BIN) else None)
     if not binary:
         raise TunnelError("xray не установлен в контейнере")
+    if cancel is not None:
+        cancel.check()
     port = _free_port()
     workdir = tempfile.mkdtemp(prefix="aiprobe-")
     cfg_path = os.path.join(workdir, "config.json")
@@ -525,8 +593,13 @@ def xray_tunnel(outbounds: list[dict]) -> Iterator[str]:
         proc = subprocess.Popen([binary, "run", "-c", cfg_path], stdout=logf,
                                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 start_new_session=True)
+        if cancel is not None:
+            cancel.attach(proc)
         deadline = time.monotonic() + 8
         while True:
+            # Раньше проверки процесса: погашенный отменой xray — не «не запустился».
+            if cancel is not None:
+                cancel.check()
             if proc.poll() is not None:
                 raise TunnelError("xray не запустился: " + (_log_tail(log_path) or f"код {proc.returncode}"))
             try:
@@ -538,6 +611,8 @@ def xray_tunnel(outbounds: list[dict]) -> Iterator[str]:
                 time.sleep(0.2)
         yield f"socks5h://127.0.0.1:{port}"
     finally:
+        if cancel is not None:
+            cancel.detach()
         if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
@@ -611,7 +686,8 @@ def _gemini_api(proxy: str, key: str) -> Verdict:
     return judge_gemini_api(_to_resp(r))
 
 
-def _attempts(fn: Callable[[], Verdict], deadline: float) -> tuple[Verdict, int]:
+def _attempts(fn: Callable[[], Verdict], deadline: float,
+              cancel: CancelToken | None = None) -> tuple[Verdict, int]:
     """До трёх попыток, пока не получим ok или blocked. Остальное — последний ответ."""
     v = Verdict(TIMEOUT, "не хватило времени на хост")
     n = 0
@@ -623,15 +699,22 @@ def _attempts(fn: Callable[[], Verdict], deadline: float) -> tuple[Verdict, int]
             v = fn()
         except Exception as exc:  # noqa: BLE001 — сеть ломается как угодно
             v = classify_exception(exc)
+        # Ответ, полученный под отмену, — это наш же погашенный xray, а не нода.
+        if cancel is not None:
+            cancel.check()
         if v.verdict in DEFINITE:
             break
         if i + 1 < TRIES:
-            time.sleep(RETRY_PAUSE)
+            _pause(RETRY_PAUSE, cancel)
     return v, n
 
 
-def probe_target(t: Target, gemini_key: str = "") -> dict:
-    """Проверить один хост. Синхронно: зовётся из потока."""
+def probe_target(t: Target, gemini_key: str = "", cancel: CancelToken | None = None) -> dict:
+    """Проверить один хост. Синхронно: зовётся из потока.
+
+    Отмена через `cancel` обрывает проверку исключением ProbeCancelled:
+    недомеренный хост не должен выглядеть сломанным.
+    """
     started = time.monotonic()
     deadline = started + HOST_BUDGET_S
     services = [k for k, _ in SERVICES if k != "gemini_api" or gemini_key]
@@ -649,8 +732,12 @@ def probe_target(t: Target, gemini_key: str = "") -> dict:
         out["duration_ms"] = int((time.monotonic() - started) * 1000)
         return out
 
+    def gate() -> None:
+        if cancel is not None:
+            cancel.check()
+
     try:
-        with xray_tunnel(t.outbounds) as proxy:
+        with xray_tunnel(t.outbounds, cancel) as proxy:
             trace: dict[str, str] | None = None
             last = Verdict(TIMEOUT, "нет ответа")
             for i in range(WARMUP_TRIES):
@@ -662,7 +749,8 @@ def probe_target(t: Target, gemini_key: str = "") -> dict:
                     last = Verdict(ERROR, f"trace {r.code}")
                 except Exception as exc:  # noqa: BLE001
                     last = classify_exception(exc)
-                time.sleep(RETRY_PAUSE)
+                _pause(RETRY_PAUSE, cancel)
+            gate()
             if trace is None:
                 out["tunnel"] = "down"
                 out["error"] = f"туннель не поднялся: {last.note}"
@@ -682,6 +770,8 @@ def probe_target(t: Target, gemini_key: str = "") -> dict:
                         break
                 except Exception:  # noqa: BLE001 — выход ИИ покажем пустым
                     pass
+                gate()
+            gate()
 
             for key in services:
                 if key == "gemini_web":
@@ -692,7 +782,7 @@ def probe_target(t: Target, gemini_key: str = "") -> dict:
                     judge = JUDGES[key]
                     url = URLS[key]
                     fn = lambda judge=judge, url=url: judge(_get(url, proxy))  # noqa: E731
-                v, n = _attempts(fn, deadline)
+                v, n = _attempts(fn, deadline, cancel)
                 out["results"][key] = {"v": v.verdict, "note": v.note, "tries": n}
     except TunnelError as exc:
         out["tunnel"] = "error"
@@ -813,111 +903,448 @@ async def effective_sub_url(db: AsyncSession, cfg: dict) -> str:
 
 
 # ── прогон ──────────────────────────────────────────────────────────────────
+#
+# Прогон бывает полный (весь парк: по расписанию или кнопкой) и выборочный
+# (хосты, которые выбрал человек). Исполнитель один: пока он занят, новые хосты
+# встают в очередь идущего прогона, а полный прогон ждёт конца выборочного.
+# Очередь живёт в памяти процесса — её и отдаём интерфейсу, поэтому спиннеры
+# переживают обновление страницы и видны с любого устройства; копия состояния
+# пишется в ai_runs.targets. Рестарт рагента очередь теряет: abort_stale
+# закрывает прогон, зависших спиннеров не остаётся.
 
-_active: asyncio.Task | None = None
+FULL = "full"
+PARTIAL = "partial"
+
+# Что с хостом внутри прогона.
+QUEUED = "queued"
+RUNNING = "running"
+CANCELLING = "cancelling"    # отмену попросили, поток ещё выходит
+DONE = "done"
+CANCELLED = "cancelled"
+MISSING = "missing"          # в свежей подписке такого хоста нет
+ABORTED = "aborted"          # прогон оборвался раньше, чем дошёл до хоста
+_WAITING = (QUEUED, RUNNING)
+MISSING_NOTE = "хоста нет в подписке или он исключён в настройках"
 
 
 class AlreadyRunning(Exception):
     pass
 
 
+@dataclass
+class _Item:
+    key: str
+    name: str
+    position: int = 0
+    state: str = QUEUED
+    error: str | None = None
+    target: Target | None = None
+    token: CancelToken = field(default_factory=CancelToken)
+
+    @property
+    def shown_state(self) -> str:
+        return CANCELLING if self.state == RUNNING and self.token.cancelled else self.state
+
+
+class _Run:
+    """Прогон в памяти: очередь хостов и состояние каждого."""
+
+    def __init__(self, scope: str, trigger: str, keys: Iterable[str] = ()) -> None:
+        self.id = uuid.uuid4()
+        self.scope = scope
+        self.trigger = trigger
+        self.items: dict[str, _Item] = {}
+        # Хосты свежей подписки; None — подписку ещё не забрали.
+        self.targets: dict[str, tuple[int, Target]] | None = None
+        # Полный прогон до подписки своих хостов не знает — отмену запоминаем.
+        self.skipped: set[str] = set()
+        self.stopped = False     # отменён целиком
+        self.closed = False      # очередь закрыта: прогон дописывает итог
+        self.created = False     # строка в ai_runs заведена
+        self.wake = asyncio.Event()   # в очередь встал новый хост
+        for key in keys:
+            self.add(key)
+
+    def add(self, key: str) -> bool:
+        """Поставить хост в очередь. False — он и так ждёт или проверяется."""
+        self.skipped.discard(key)
+        old = self.items.get(key)
+        if old is not None and old.state in _WAITING:
+            return False
+        item = _Item(key=key, name=old.name if old else key, position=old.position if old else 0)
+        self.items[key] = item
+        if self.targets is not None:
+            self._bind(item)
+        self.wake.set()
+        return True
+
+    @property
+    def accepting(self) -> bool:
+        """Берёт ли прогон новые хосты: остановленный и дописывающий итог — нет."""
+        return not (self.closed or self.stopped)
+
+    def _bind(self, item: _Item) -> None:
+        found = (self.targets or {}).get(item.key)
+        if found is not None:
+            item.position, item.target = found
+            item.name = item.target.name
+        elif item.state == QUEUED:
+            item.state, item.error = MISSING, MISSING_NOTE
+
+    def resolve(self, targets: list[Target]) -> None:
+        """Привязать очередь к хостам свежей подписки."""
+        self.targets = {t.key: (i, t) for i, t in enumerate(targets)}
+        if self.scope == FULL:
+            # Порядок — как в подписке. Хосты, которые успели попросить отдельно,
+            # уже в очереди; лишние (которых в подписке нет) уходят в хвост.
+            asked, self.items = self.items, {}
+            for t in targets:
+                self.items[t.key] = asked.pop(t.key, None) or _Item(key=t.key, name=t.name)
+            self.items.update(asked)
+        for item in self.items.values():
+            if item.target is None:
+                self._bind(item)
+            if item.state == QUEUED and (self.stopped or item.key in self.skipped):
+                item.state = CANCELLED
+        self.skipped.clear()
+
+    def next_queued(self) -> _Item | None:
+        if self.closed:
+            return None
+        for item in self.items.values():
+            if item.state == QUEUED and item.target is not None:
+                return item
+        return None
+
+    def cancel(self, keys: Iterable[str]) -> None:
+        """Снять хосты из очереди, идущие проверки — прервать."""
+        for key in keys:
+            item = self.items.get(key)
+            if item is None:
+                if self.scope == FULL and self.targets is None:
+                    self.skipped.add(key)
+            elif item.state == QUEUED:
+                item.state = CANCELLED
+            elif item.state == RUNNING:
+                item.token.cancel()      # состояние сменит исполнитель, когда поток выйдет
+
+    def stop(self) -> None:
+        """Отмена человеком: очередь снята, идущие проверки прерваны."""
+        self.stopped = True
+        self.cancel(list(self.items))
+
+    def halt(self) -> None:
+        """Прогон оборвался (рагент выключается или упало): гасим идущие
+        проверки, очередь дальше не идёт. Ждавшие хосты остаются «в очереди» —
+        это не отмена, в записи прогона они будут оборванными."""
+        self.closed = True
+        for item in self.items.values():
+            if item.state == RUNNING:
+                item.token.cancel()
+
+    def count(self, state: str) -> int:
+        return sum(1 for i in self.items.values() if i.state == state)
+
+    def snapshot(self) -> list[dict]:
+        return [{"key": i.key, "host": i.name, "pos": i.position, "state": i.shown_state,
+                 "error": i.error} for i in self.items.values()]
+
+
+_current: _Run | None = None        # идущий прогон
+_next: _Run | None = None           # ждёт, пока идущий закончится
+_driver: asyncio.Task | None = None
+
+
 def is_running() -> bool:
-    return _active is not None and not _active.done()
+    return _current is not None
 
 
-async def start_run(trigger: str) -> uuid.UUID:
-    """Завести прогон и запустить его в фоне. Один прогон за раз."""
-    global _active
-    from app.db import SessionLocal
+def live() -> dict | None:
+    """Идущий прогон глазами интерфейса: кто в очереди, кто проверяется."""
+    cur, nxt = _current, _next
+    if cur is None:
+        return None
+    hosts = {h["key"]: h for h in cur.snapshot()}
+    if nxt is not None and nxt.scope == PARTIAL:
+        hosts.update({h["key"]: h for h in nxt.snapshot()})
+    return {
+        "id": cur.id, "scope": cur.scope, "trigger": cur.trigger,
+        "resolved": cur.targets is not None, "stopping": cur.stopped,
+        "skipped": set(cur.skipped), "hosts": list(hosts.values()),
+        "pending_full": nxt.trigger if nxt is not None and nxt.scope == FULL else None,
+    }
 
-    if is_running():
+
+async def start_run(trigger: str, keys: list[str] | None = None) -> None:
+    """Запустить прогон: полный (keys пуст) или по выбранным хостам.
+
+    Исполнитель один. Хосты, попрошенные во время идущего прогона, встают в его
+    очередь — без дублей. Полный прогон поверх полного — AlreadyRunning; поверх
+    выборочного он встаёт следом и стартует, как только тот закончится.
+    """
+    global _current, _next, _driver
+    scope = PARTIAL if keys else FULL
+    cur = _current
+    if cur is None:
+        run = _Run(scope, trigger, keys or ())
+        # До первого await: следующий запрос уже увидит прогон и встанет в него.
+        _current = run
+        try:
+            await _db_create(run)
+        except BaseException:
+            _current = None
+            raise
+        _driver = asyncio.create_task(_drive(), name=f"ai-access-{trigger}")
+        return
+
+    if scope == PARTIAL:
+        if cur.accepting:
+            if [k for k in keys or () if cur.add(k)]:
+                await _db_sync(cur)
+        elif _next is None:
+            # Идущий прогон остановлен или пишет итог — хосты пойдут сразу за ним.
+            _next = _Run(PARTIAL, trigger, keys or ())
+        elif _next.scope == PARTIAL:
+            for k in keys or ():
+                _next.add(k)
+        # Полный прогон в очереди проверит их и так.
+        return
+
+    if (cur.scope == FULL and cur.accepting) or (_next is not None and _next.scope == FULL):
         raise AlreadyRunning()
-    async with SessionLocal() as db:
-        run = AiRun(status="running", trigger=trigger, hosts_done=0)
-        db.add(run)
-        await db.commit()
-        run_id = run.id
-    _active = asyncio.create_task(_execute(run_id), name=f"ai-access-{trigger}")
-    return run_id
+    _next = _Run(FULL, trigger)
 
 
-async def _finish(run_id: uuid.UUID, **values) -> None:
+async def cancel_run(keys: list[str] | None = None) -> None:
+    """Отменить проверку хостов или весь прогон (keys пуст), включая ждущий.
+
+    Уже проверенные хосты остаются с результатом; отменённые — с прежним:
+    строки в ai_checks для них просто нет.
+    """
+    global _next
+    cur = _current
+    if keys is None:
+        _next = None
+        if cur is not None:
+            cur.stop()
+    else:
+        if _next is not None and _next.scope == PARTIAL:
+            for k in keys:
+                _next.items.pop(k, None)
+            if not _next.items:
+                _next = None
+        if cur is not None:
+            cur.cancel(keys)
+    if cur is not None and cur.created and not cur.closed:
+        await _db_sync(cur)
+
+
+async def _drive() -> None:
+    """Исполнитель: гонит прогоны по одному, пока есть что гнать."""
+    global _current, _next
+    try:
+        while _current is not None:
+            await _execute(_current)
+            # Без await между строками: запрос не попадёт в зазор между прогонами.
+            _current, _next = _next, None
+    except BaseException:
+        _current = _next = None
+        raise
+
+
+async def _check(run: _Run, item: _Item, gemini: str) -> None:
+    await _db_sync(run)
+    try:
+        res = await asyncio.to_thread(probe_target, item.target, gemini, item.token)
+    except ProbeCancelled:
+        item.state = CANCELLED
+    else:
+        await _db_save_check(run, item, res)
+        item.state = DONE
+    await _db_sync(run)
+
+
+async def _pump(run: _Run, gemini: str, limit: int) -> None:
+    """Держать до `limit` проверок разом, пока очередь не опустеет.
+
+    Хосты доставляют и во время прогона: новый сразу занимает свободное место,
+    не дожидаясь, пока закончится соседняя проверка.
+    """
+    busy: set[asyncio.Task] = set()
+    try:
+        while True:
+            run.wake.clear()
+            while len(busy) < limit and (item := run.next_queued()) is not None:
+                item.state = RUNNING
+                busy.add(asyncio.create_task(_check(run, item, gemini)))
+            if not busy:
+                # Без await до выхода: хост, попрошенный позже, уйдёт в следующий прогон.
+                run.closed = True
+                return
+            waker = asyncio.create_task(run.wake.wait())
+            try:
+                done, _ = await asyncio.wait({*busy, waker}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                waker.cancel()
+            for task in done - {waker}:
+                busy.discard(task)
+                task.result()       # ошибка записи в базу роняет весь прогон
+    finally:
+        for task in busy:
+            task.cancel()
+
+
+def _outcome(run: _Run) -> tuple[str, str | None]:
+    done = run.count(DONE)
+    if run.count(CANCELLED) and (run.stopped or not done):
+        return "cancelled", None
+    if not done:
+        names = ", ".join(i.name for i in run.items.values() if i.state == MISSING)
+        return "failed", f"{MISSING_NOTE}: {names}"[:500]
+    return "done", None
+
+
+async def _execute(run: _Run) -> None:
+    try:
+        if not run.created:
+            await _db_create(run)
+        cfg, key, url = await _db_context()
+        profiles = await asyncio.to_thread(fetch_profiles, url)
+        targets = build_targets(profiles, cfg.get("exclude") or "")
+        if run.scope == FULL and not targets:
+            raise RuntimeError("в подписке не нашлось ни одного хоста")
+        run.resolve(targets)
+        await _db_sync(run)
+
+        await _pump(run, key, max(1, min(4, int(cfg.get("concurrency") or 2))))
+
+        status, error = _outcome(run)
+        if status != "done" or run.scope != FULL:
+            await _db_finish(run, status, error=error)
+            log.info("ai-access: %s прогон %s, проверено хостов %s",
+                     "выборочный" if run.scope == PARTIAL else "полный", status, run.count(DONE))
+            return
+
+        # Сравнение, сводка и расписание — только у полного прогона.
+        changes = await _db_changes(run)
+        await _db_finish(run, "done", changes=changes)
+        log.info("ai-access: прогон готов, хостов %s, изменений %s", run.count(DONE), len(changes))
+
+        text = summary_text(changes)
+        if text and cfg.get("notify"):
+            err = await _send_summary(cfg, text)
+            if err:
+                log.warning("ai-access: уведомление не ушло: %s", err)
+    except asyncio.CancelledError:
+        run.halt()
+        await asyncio.shield(_db_finish(run, "aborted", error="прогон прерван"))
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("ai-access: прогон упал")
+        run.halt()      # соседние проверки не должны работать в пустоту
+        try:
+            await _db_finish(run, "failed", error=str(exc)[:500])
+        except Exception:  # noqa: BLE001 — база легла вместе с прогоном
+            log.exception("ai-access: не смог записать итог прогона")
+
+
+# ── прогон: записи в базу ───────────────────────────────────────────────────
+
+async def _db_create(run: _Run) -> None:
     from app.db import SessionLocal
 
     async with SessionLocal() as db:
-        await db.execute(update(AiRun).where(AiRun.id == run_id)
-                         .values(finished_at=_now(), **values))
+        db.add(AiRun(id=run.id, status="running", trigger=run.trigger, scope=run.scope,
+                     hosts_total=len(run.items) or None, hosts_done=0, targets=run.snapshot()))
         await db.commit()
+    run.created = True
+
+
+async def _db_context() -> tuple[dict, str, str]:
+    from app.db import SessionLocal
+
+    async with SessionLocal() as db:
+        cfg = await get_config(db)
+        return cfg, await gemini_key(db), await effective_sub_url(db, cfg)
+
+
+async def _db_sync(run: _Run) -> None:
+    """Состояние очереди — в базу: его видно в списке прогонов и после конца."""
+    from app.db import SessionLocal
+
+    async with SessionLocal() as db:
+        await db.execute(update(AiRun).where(AiRun.id == run.id).values(
+            hosts_total=len(run.items) or None, hosts_done=run.count(DONE), targets=run.snapshot()))
+        await db.commit()
+
+
+async def _db_save_check(run: _Run, item: _Item, res: dict) -> None:
+    from app.db import SessionLocal
+
+    async with SessionLocal() as db:
+        db.add(AiCheck(
+            run_id=run.id, host=res["host"][:255], host_key=res["host_key"][:255],
+            position=item.position,
+            tunnel=res["tunnel"], exit_ip=res["exit_ip"], exit_country=res["exit_country"],
+            ai_ip=res["ai_ip"], ai_country=res["ai_country"], ai_warp=res["ai_warp"],
+            duration_ms=res.get("duration_ms") or 0, results=res["results"],
+            error=res["error"]))
+        await db.commit()
+
+
+async def _db_finish(run: _Run, status: str, error: str | None = None,
+                     changes: list[dict] | None = None) -> None:
+    from app.db import SessionLocal
+
+    async with SessionLocal() as db:
+        await db.execute(update(AiRun).where(AiRun.id == run.id).values(
+            finished_at=_now(), status=status, error=error, changes=changes,
+            hosts_total=len(run.items) or None, hosts_done=run.count(DONE),
+            targets=run.snapshot()))
+        await db.commit()
+
+
+async def _db_changes(run: _Run) -> list[dict]:
+    """Отличия полного прогона от предыдущего удачного полного."""
+    from app.db import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(AiRun, run.id)
+        prev = await previous_done(db, before=row.started_at if row else None)
+        if prev is None:
+            return []
+        return diff_runs(await _rows_of(db, prev.id), await _rows_of(db, run.id))
+
+
+async def _send_summary(cfg: dict, text: str) -> str | None:
+    from app.db import SessionLocal
+
+    async with SessionLocal() as db:
+        return await _notify(db, cfg, text)
 
 
 async def _rows_of(db: AsyncSession, run_id: uuid.UUID) -> dict[str, dict]:
-    rows = await db.execute(select(AiCheck).where(AiCheck.run_id == run_id))
+    # По времени: хост, перепроверенный внутри прогона, берём по последней проверке.
+    rows = await db.execute(select(AiCheck).where(AiCheck.run_id == run_id)
+                            .order_by(AiCheck.checked_at.asc()))
     return {c.host_key: {"host": c.host, "results": c.results or {}, "ai_country": c.ai_country}
             for c in rows.scalars()}
 
 
 async def previous_done(db: AsyncSession, before: datetime | None = None) -> AiRun | None:
-    q = select(AiRun).where(AiRun.status == "done")
+    """Последний удачный полный прогон — опора матрицы и сравнения."""
+    q = select(AiRun).where(AiRun.status == "done", AiRun.scope == FULL)
     if before is not None:
         q = q.where(AiRun.started_at < before)
     row = await db.execute(q.order_by(AiRun.started_at.desc()).limit(1))
     return row.scalars().first()
 
 
-async def _execute(run_id: uuid.UUID) -> None:
-    from app.db import SessionLocal
-
-    try:
-        async with SessionLocal() as db:
-            cfg = await get_config(db)
-            key = await gemini_key(db)
-            url = await effective_sub_url(db, cfg)
-        profiles = await asyncio.to_thread(fetch_profiles, url)
-        targets = build_targets(profiles, cfg.get("exclude") or "")
-        if not targets:
-            raise RuntimeError("в подписке не нашлось ни одного хоста")
-        async with SessionLocal() as db:
-            await db.execute(update(AiRun).where(AiRun.id == run_id).values(hosts_total=len(targets)))
-            await db.commit()
-
-        sem = asyncio.Semaphore(max(1, min(4, int(cfg.get("concurrency") or 2))))
-
-        async def one(pos: int, t: Target) -> None:
-            async with sem:
-                res = await asyncio.to_thread(probe_target, t, key)
-            async with SessionLocal() as db:
-                db.add(AiCheck(
-                    run_id=run_id, host=res["host"][:255], host_key=res["host_key"][:255],
-                    position=pos,
-                    tunnel=res["tunnel"], exit_ip=res["exit_ip"], exit_country=res["exit_country"],
-                    ai_ip=res["ai_ip"], ai_country=res["ai_country"], ai_warp=res["ai_warp"],
-                    duration_ms=res.get("duration_ms") or 0, results=res["results"],
-                    error=res["error"]))
-                await db.execute(update(AiRun).where(AiRun.id == run_id)
-                                 .values(hosts_done=AiRun.hosts_done + 1))
-                await db.commit()
-
-        await asyncio.gather(*(one(i, t) for i, t in enumerate(targets)))
-
-        async with SessionLocal() as db:
-            run = await db.get(AiRun, run_id)
-            prev = await previous_done(db, before=run.started_at if run else None)
-            changes = diff_runs(await _rows_of(db, prev.id), await _rows_of(db, run_id)) if prev else []
-        await _finish(run_id, status="done", changes=changes)
-        log.info("ai-access: прогон готов, хостов %s, изменений %s", len(targets), len(changes))
-
-        text = summary_text(changes)
-        if text and cfg.get("notify"):
-            async with SessionLocal() as db:
-                err = await _notify(db, cfg, text)
-            if err:
-                log.warning("ai-access: уведомление не ушло: %s", err)
-    except asyncio.CancelledError:
-        await asyncio.shield(_finish(run_id, status="aborted", error="прогон прерван"))
-        raise
-    except Exception as exc:  # noqa: BLE001
-        log.exception("ai-access: прогон упал")
-        await _finish(run_id, status="failed", error=str(exc)[:500])
+async def last_full(db: AsyncSession) -> AiRun | None:
+    """Последний полный прогон любого исхода: по нему считается расписание."""
+    row = await db.execute(select(AiRun).where(AiRun.scope == FULL)
+                           .order_by(AiRun.started_at.desc()).limit(1))
+    return row.scalars().first()
 
 
 async def _notify(db: AsyncSession, cfg: dict, text: str) -> str | None:
@@ -932,10 +1359,13 @@ async def _notify(db: AsyncSession, cfg: dict, text: str) -> str | None:
 
 async def shutdown() -> None:
     """Остановить идущий прогон при выключении рагента."""
-    if is_running() and _active is not None:
-        _active.cancel()
+    global _next
+    _next = None
+    task = _driver
+    if task is not None and not task.done():
+        task.cancel()
         try:
-            await _active
+            await task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
 
@@ -955,13 +1385,122 @@ async def prune(db: AsyncSession, keep_days: int) -> int:
     return res.rowcount or 0
 
 
+# ── матрица: последний результат каждого хоста ──────────────────────────────
+
+@dataclass
+class MatrixRow:
+    key: str
+    check: AiCheck            # свежий результат хоста
+    before: AiCheck | None    # с чем его сравниваем
+    is_new: bool
+    partial: bool             # результат из выборочного прогона
+
+
+def build_matrix(pairs: list[tuple[AiCheck, AiRun]], shown: AiRun | None, prev: AiRun | None,
+                 base_keys: list[str]) -> list[MatrixRow]:
+    """Матрица из последних результатов каждого хоста, а не из одного прогона.
+
+    pairs — проверки вместе со своими прогонами; shown — последний удачный
+    полный прогон, prev — удачный полный перед ним; base_keys — хосты shown в
+    порядке подписки. Состав матрицы задаёт shown, а результат у каждого хоста
+    свой — самый свежий, из какого бы прогона он ни был. Хост, отменённый в
+    shown, остаётся с прежним результатом; хост, которого в shown нет, попадает
+    в матрицу, только если проверен позже.
+
+    С чем сравниваем: результат полного прогона — с предыдущим удачным полным
+    (как в сводке изменений), результат выборочного — с предыдущим результатом
+    этого же хоста.
+    """
+    by_key: dict[str, list[tuple[AiCheck, AiRun]]] = {}
+    for check, run in sorted(pairs, key=lambda p: p[0].checked_at):
+        by_key.setdefault(check.host_key, []).append((check, run))
+
+    keys = [k for k in dict.fromkeys(base_keys) if k in by_key]
+    base = set(keys)
+    floor = shown.started_at if shown is not None else None
+    extra = [k for k, items in by_key.items()
+             if k not in base and (floor is None or items[-1][0].checked_at >= floor)]
+    extra.sort(key=lambda k: (by_key[k][-1][0].position, k))
+
+    def reference(run: AiRun) -> AiRun | None:
+        for cand in (shown, prev):
+            if cand is not None and cand.id != run.id and cand.started_at < run.started_at:
+                return cand
+        return None
+
+    rows: list[MatrixRow] = []
+    for key in [*keys, *extra]:
+        items = by_key[key]
+        check, run = items[-1]
+        if run.scope == PARTIAL:
+            before = items[-2][0] if len(items) > 1 else None
+            rows.append(MatrixRow(key, check, before, is_new=False, partial=True))
+            continue
+        ref = reference(run)
+        before = next((c for c, r in reversed(items) if ref is not None and r.id == ref.id), None)
+        rows.append(MatrixRow(key, check, before, is_new=ref is not None and before is None,
+                              partial=False))
+    return rows
+
+
+async def load_matrix(db: AsyncSession) -> tuple[AiRun | None, AiRun | None, list[MatrixRow]]:
+    """(последний удачный полный прогон, удачный полный перед ним, строки матрицы)."""
+    shown = await previous_done(db)
+    prev = await previous_done(db, before=shown.started_at) if shown else None
+
+    q = select(AiCheck, AiRun).join(AiRun, AiRun.id == AiCheck.run_id)
+    if shown is not None:
+        # Всё новее опорного прогона и сам он с предыдущим — для сравнения.
+        q = q.where(AiCheck.checked_at >= (prev or shown).started_at)
+    pairs = [(c, r) for c, r in (await db.execute(q)).all()]
+
+    if shown is None:
+        return None, None, build_matrix(pairs, None, None, [])
+    if shown.targets:
+        own = [t for t in shown.targets
+               if isinstance(t, dict) and t.get("key") and t.get("state") != MISSING]
+        base_keys = [t["key"] for t in sorted(own, key=lambda t: t.get("pos") or 0)]
+    else:   # прогон до миграции 014: состав — его же строки
+        rows = sorted((c for c, r in pairs if r.id == shown.id),
+                      key=lambda c: (c.position, c.host_key))
+        base_keys = [c.host_key for c in rows]
+    # Хост, отменённый и в shown, и в prev: его последний результат старше окна.
+    seen = {c.host_key for c, _ in pairs}
+    lost = [k for k in base_keys if k not in seen]
+    if lost:
+        older = await db.execute(select(AiCheck, AiRun).join(AiRun, AiRun.id == AiCheck.run_id)
+                                 .where(AiCheck.host_key.in_(lost)))
+        pairs += [(c, r) for c, r in older.all()]
+    return shown, prev, build_matrix(pairs, shown, prev, base_keys)
+
+
+# ── расписание ──────────────────────────────────────────────────────────────
+
 def is_due(last: AiRun | None, interval_hours: float, now: datetime) -> bool:
+    """Пора ли запускать полный прогон. last — последний ПОЛНЫЙ прогон:
+    выборочные расписание не сдвигают."""
     if last is None:
         return True
     age = now - last.started_at
     if last.status in ("failed", "aborted"):
         return age >= min(FAILED_RETRY_AFTER, timedelta(hours=interval_hours))
+    # Отменённый человеком (cancelled) через час не повторяем: отменил — значит
+    # не хотел. Ждём обычный интервал.
     return age >= timedelta(hours=interval_hours)
+
+
+async def schedule_tick(db: AsyncSession, cfg: dict) -> None:
+    """Запустить плановый полный прогон, если пора.
+
+    Идёт выборочный прогон — плановый встаёт следом за ним и стартует, как
+    только тот закончится, а не ждёт следующего тика. Идёт полный или плановый
+    уже стоит в очереди — AlreadyRunning.
+    """
+    if not cfg.get("enabled"):
+        return
+    hours = max(1.0, float(cfg.get("interval_hours") or 12))
+    if is_due(await last_full(db), hours, _now()):
+        await start_run("schedule")
 
 
 async def run_ai_access() -> None:
@@ -982,19 +1521,15 @@ async def run_ai_access() -> None:
         try:
             async with SessionLocal() as db:
                 cfg = await get_config(db)
-                if cfg.get("enabled") and not is_running():
-                    row = await db.execute(select(AiRun).order_by(AiRun.started_at.desc()).limit(1))
-                    last = row.scalars().first()
-                    hours = max(1.0, float(cfg.get("interval_hours") or 12))
-                    if is_due(last, hours, _now()):
-                        await start_run("schedule")
+                try:
+                    await schedule_tick(db, cfg)
+                except AlreadyRunning:
+                    pass
                 if time.monotonic() - last_prune > 86400:
                     await prune(db, int(cfg.get("keep_days") or 45))
                     last_prune = time.monotonic()
         except asyncio.CancelledError:
             raise
-        except AlreadyRunning:
-            pass
         except Exception:  # noqa: BLE001
             log.exception("ai-access: цикл упал")
         await asyncio.sleep(TICK_S)

@@ -659,8 +659,9 @@ class AiCellOut(BaseModel):
 class AiHostRowOut(BaseModel):
     host: str
     host_key: str
-    checked_at: datetime
-    tunnel: str
+    # Пусто у хоста, который стоит в очереди и ещё ни разу не проверялся.
+    checked_at: datetime | None = None
+    tunnel: str | None = None
     exit_ip: str | None = None
     exit_country: str | None = None
     ai_ip: str | None = None
@@ -672,27 +673,49 @@ class AiHostRowOut(BaseModel):
     results: dict[str, AiCellOut] = Field(default_factory=dict)
     changed: bool = False
     is_new: bool = False
+    partial: bool = False         # результат из выборочного прогона, а не из полного
+    # Что с хостом в идущем прогоне: queued | running | cancelling | done |
+    # cancelled | missing. Пусто — хост в нём не участвует.
+    state: str | None = None
+    run_error: str | None = None  # почему последний выборочный прогон его не проверил
+
+
+class AiRunHostOut(BaseModel):
+    key: str
+    host: str
+    state: str                    # как AiHostRowOut.state, плюс aborted у оборванного прогона
+    error: str | None = None
 
 
 class AiRunOut(BaseModel):
     id: uuid.UUID
     started_at: datetime
     finished_at: datetime | None = None
-    status: str
+    status: str                   # running | done | failed | aborted | cancelled
     trigger: str
+    scope: str = "full"           # full | partial
     hosts_total: int | None = None
     hosts_done: int = 0
     error: str | None = None
     changes: list[dict] = Field(default_factory=list)
+    hosts: list[AiRunHostOut] = Field(default_factory=list)
+    stopping: bool = False        # прогон отменён и сворачивается
+
+
+class AiRunRequest(BaseModel):
+    # Ключи хостов (host_key из матрицы). Поля нет — речь про весь прогон.
+    hosts: list[str] | None = Field(default=None, max_length=500)
 
 
 class AiAccessStatusOut(BaseModel):
     config: AiAccessConfigOut
     services: list[AiServiceOut]
-    running: AiRunOut | None = None
-    last: AiRunOut | None = None        # последний прогон любого исхода
-    shown: AiRunOut | None = None       # прогон, чья матрица показана (последний удачный)
+    running: AiRunOut | None = None     # идущий прогон, полный или выборочный
+    last: AiRunOut | None = None        # последний полный прогон любого исхода
+    shown: AiRunOut | None = None       # опора матрицы: последний удачный полный прогон
     prev: AiRunOut | None = None        # с чем сравниваем
+    last_partial: AiRunOut | None = None   # последний законченный выборочный прогон
+    pending_full: str | None = None     # полный прогон ждёт конца выборочного: schedule | manual
     rows: list[AiHostRowOut] = Field(default_factory=list)
     next_run_at: datetime | None = None
 

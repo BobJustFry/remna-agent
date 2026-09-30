@@ -177,10 +177,14 @@ class SubCheck(Base):
 
 
 class AiRun(Base):
-    """Один прогон проверки доступа к ИИ по всем хостам подписки.
+    """Один прогон проверки доступа к ИИ: по всем хостам подписки или по выборке.
 
     Прогон длится минуты, поэтому заводится сразу со статусом running и
     дописывается по мере хода: интерфейс показывает прогресс по hosts_done.
+
+    Полный прогон (scope=full) — опора матрицы, расписания и сводки в Телеграм.
+    Выборочный (partial) обновляет только свои хосты и ни на что из этого не
+    влияет.
     """
 
     __tablename__ = "ai_runs"
@@ -190,13 +194,20 @@ class AiRun(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    status: Mapped[str] = mapped_column(String(16), nullable=False)   # running | done | failed | aborted
+    # running | done | failed | aborted (рагент перезапустился) | cancelled (отменил человек)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
     trigger: Mapped[str] = mapped_column(String(16), nullable=False)  # schedule | manual
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="full", server_default="full"
+    )   # full | partial
     hosts_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     hosts_done: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Отличия от прошлого удачного прогона — считаются один раз, в конце.
+    # Отличия от прошлого удачного полного прогона — считаются один раз, в конце.
     changes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Хосты прогона и что с каждым: [{"key", "host", "pos", "state", "error"}].
+    # Пишется по ходу; у прогонов до миграции 014 пусто.
+    targets: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class AiCheck(Base):

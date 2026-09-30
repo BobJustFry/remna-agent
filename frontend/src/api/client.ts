@@ -172,7 +172,18 @@ export const api = {
     request<{ sent: boolean }>("/api/subwatch/telegram/test", { method: "POST" }),
 
   aiAccessStatus: () => request<AiAccessStatus>("/api/ai-access/status"),
-  aiAccessRun: () => request<AiAccessStatus>("/api/ai-access/run", { method: "POST" }),
+  /** Без ключей — весь парк; с ключами — только эти хосты (встают в очередь идущего прогона). */
+  aiAccessRun: (hosts?: string[]) =>
+    request<AiAccessStatus>("/api/ai-access/run", {
+      method: "POST",
+      ...(hosts ? { body: JSON.stringify({ hosts }) } : {}),
+    }),
+  /** Без ключей — отменить весь прогон; с ключами — снять эти хосты. */
+  aiAccessCancel: (hosts?: string[]) =>
+    request<AiAccessStatus>("/api/ai-access/cancel", {
+      method: "POST",
+      ...(hosts ? { body: JSON.stringify({ hosts }) } : {}),
+    }),
   aiAccessUpdate: (payload: AiAccessUpdate) =>
     request<AiAccessStatus>("/api/ai-access/settings", {
       method: "PATCH",
@@ -856,11 +867,22 @@ export type AiCell = {
   prev: AiVerdict | null;
 };
 
+/** Что с хостом в идущем прогоне. */
+export type AiHostState =
+  | "queued"
+  | "running"
+  | "cancelling"
+  | "done"
+  | "cancelled"
+  | "missing"
+  | "aborted";
+
 export type AiHostRow = {
   host: string;
   host_key: string;
-  checked_at: string;
-  tunnel: "up" | "down" | "error";
+  /** null — хост стоит в очереди и ещё ни разу не проверялся. */
+  checked_at: string | null;
+  tunnel: "up" | "down" | "error" | null;
   exit_ip: string | null;
   exit_country: string | null;
   ai_ip: string | null;
@@ -872,6 +894,19 @@ export type AiHostRow = {
   results: Record<string, AiCell>;
   changed: boolean;
   is_new: boolean;
+  /** Результат из выборочного прогона, а не из полного. */
+  partial: boolean;
+  /** Состояние в идущем прогоне; null — хост в нём не участвует. */
+  state: AiHostState | null;
+  /** Почему последний выборочный прогон не смог его проверить. */
+  run_error: string | null;
+};
+
+export type AiRunHost = {
+  key: string;
+  host: string;
+  state: AiHostState;
+  error: string | null;
 };
 
 export type AiChange = {
@@ -886,21 +921,32 @@ export type AiRun = {
   id: string;
   started_at: string;
   finished_at: string | null;
-  status: "running" | "done" | "failed" | "aborted";
+  status: "running" | "done" | "failed" | "aborted" | "cancelled";
   trigger: "schedule" | "manual";
+  scope: "full" | "partial";
   hosts_total: number | null;
   hosts_done: number;
   error: string | null;
   changes: AiChange[];
+  hosts: AiRunHost[];
+  /** Прогон отменён и сворачивается. */
+  stopping: boolean;
 };
 
 export type AiAccessStatus = {
   config: AiAccessConfig;
   services: { key: string; name: string }[];
+  /** Идущий прогон, полный или выборочный. Состояние живёт на сервере. */
   running: AiRun | null;
+  /** Последний полный прогон любого исхода. */
   last: AiRun | null;
+  /** Опора матрицы: последний удачный полный прогон. */
   shown: AiRun | null;
   prev: AiRun | null;
+  /** Последний законченный выборочный прогон. */
+  last_partial: AiRun | null;
+  /** Полный прогон ждёт конца выборочного. */
+  pending_full: "schedule" | "manual" | null;
   rows: AiHostRow[];
   next_run_at: string | null;
 };
