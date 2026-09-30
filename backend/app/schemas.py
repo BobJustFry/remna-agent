@@ -750,6 +750,7 @@ class NodeWatchConfigOut(BaseModel):
     chat_id: str = ""
     exclude: list[str] = Field(default_factory=list)
     skip_panel_disabled: bool = True
+    panel_alive: bool = True
     utc_offset: int = 5
     bot_ready: bool = False
 
@@ -762,6 +763,7 @@ class NodeWatchConfigUpdate(BaseModel):
     chat_id: str | None = Field(default=None, max_length=64)
     exclude: list[uuid.UUID] | None = Field(default=None, max_length=1000)
     skip_panel_disabled: bool | None = None
+    panel_alive: bool | None = None
     utc_offset: int | None = Field(default=None, ge=-12, le=14)
 
 
@@ -783,15 +785,34 @@ class FleetBlindOut(BaseModel):
     total: int = 0
 
 
+class NodeViaPanelOut(BaseModel):
+    """Рагент до ноды не дотягивается — наблюдается через панель."""
+
+    node_id: str
+    name: str
+    host: str | None = None
+    hosting: str | None = None
+    since: datetime
+    # false — панель сейчас про ноду молчит: жива ли она, неизвестно.
+    panel_seen: bool = True
+
+
+class PanelLostOut(BaseModel):
+    since: datetime
+    alerted: bool = False
+
+
 class NodeWatchStatusOut(BaseModel):
     config: NodeWatchConfigOut
     down: list[NodeDownOut] = Field(default_factory=list)
+    via_panel: list[NodeViaPanelOut] = Field(default_factory=list)
     fleet: FleetBlindOut | None = None
+    panel_lost: PanelLostOut | None = None
 
 
 class NodeOutageOut(BaseModel):
     id: uuid.UUID
-    kind: str                       # node | fleet
+    kind: str                       # node | fleet | panel
     node_id: uuid.UUID | None = None
     name: str
     host: str | None = None

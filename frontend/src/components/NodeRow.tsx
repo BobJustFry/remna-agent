@@ -1,7 +1,8 @@
 import { memo, useState } from "react";
-import { api, type NodeDown, type RemnaScriptAction } from "../api/client";
+import { api, type RemnaScriptAction } from "../api/client";
 import type { InstallJob } from "../hooks/useAgentInstallQueue";
 import { agentNeedsUpdate, remnanodeNeedsUpdate, warpNeedsInstall } from "../hooks/useRemnawaveVersions";
+import type { NodeMark } from "../lib/nodeWatch";
 import type { AgentStatus, NodeItem, OnlineStatus, SharingUserHit, SshCheckResult } from "../types";
 import { CopyButton } from "./CopyButton";
 import { CountryFlag } from "./CountryFlag";
@@ -15,8 +16,8 @@ export type NodeListDensity = "comfortable" | "compact";
 type Props = {
   node: NodeItem;
   status?: OnlineStatus;
-  /** Рагент не получает от ноды данных: с какого времени и что молчит. */
-  down?: NodeDown;
+  /** Рагент не получает от ноды данных: лежит или видна только через панель. */
+  down?: NodeMark;
   agent?: AgentStatus;
   sharingHits?: SharingUserHit[];
   inboundIps?: number | null;
@@ -457,7 +458,8 @@ export const NodeRow = memo(function NodeRow({
           </div>
           {!compact && (
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-[var(--muted)]">
-              <DownSince down={down} />
+              {/* «Через панель» — спокойная пометка: короткая, чтобы не вытеснять адрес. */}
+              <DownSince down={down} compact={down?.kind === "via_panel"} />
               <span className="truncate">
                 {node.ssh_user}@{node.host}:{node.ssh_port}
               </span>

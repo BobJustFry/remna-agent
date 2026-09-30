@@ -152,6 +152,24 @@ export function NodeWatchSettings({ nodes, onChanged }: Props) {
           </span>
         </label>
 
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={cfg.panel_alive}
+            disabled={busy}
+            onChange={(e) => void patch({ panel_alive: e.target.checked })}
+            className="mt-0.5 h-4 w-4 accent-[var(--accent)]"
+          />
+          <span>
+            Считать ноду живой, если её видит панель
+            <span className="block text-xs text-[var(--muted)]">
+              Рагент стоит в России, и до части зарубежных нод ему не достать — хотя они работают.
+              Если агент и SSH молчат, а панель видит ноду подключённой, тревоги нет: за такой нодой
+              следим через панель и тревожим, когда её потеряет и панель.
+            </span>
+          </span>
+        </label>
+
         <details>
           <summary className="cursor-pointer text-xs text-[var(--muted)] hover:text-[var(--text)]">
             Исключения — ноды, по которым не тревожить
@@ -198,8 +216,15 @@ export function NodeWatchSettings({ nodes, onChanged }: Props) {
           Одно сообщение, когда нода упала, и одно, когда поднялась — с тем, сколько лежала. Ноды,
           упавшие вместе, идут одним списком. Если разом замолчало больше половины парка, это,
           скорее всего, ослеп сам рагент: придёт одно сообщение про парк, а не по каждой ноде. Бот —
-          тот же, что у следилки за подпиской{cfg.bot_ready ? "" : " (сейчас не настроен)"}.
+          тот же, что у следилки за подпиской.
         </p>
+        {!cfg.bot_ready && (
+          <p className="mt-2 rounded-lg border border-[rgba(251,191,36,0.45)] bg-[rgba(251,191,36,0.10)] px-3 py-2 text-xs text-[var(--warning)]">
+            Бот не настроен — сообщения не отправляются. Задайте токен бота и id чата выше, в
+            следилке за подпиской (или id чата здесь). Журнал простоев при этом ведётся; когда бот
+            появится, придёт одно сообщение о нодах, которые в тот момент ещё лежат.
+          </p>
+        )}
 
         <div className="mt-3 flex flex-wrap items-end gap-3">
           <label className="min-w-40 flex-[2]">

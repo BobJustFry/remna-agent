@@ -1,10 +1,17 @@
-import type { NodeDown, NodeSignals } from "../api/client";
+import type { NodeDown, NodeSignals, NodeViaPanel, NodeWatchStatus } from "../api/client";
 
-export type NodeDownMap = Record<string, NodeDown>;
+/** Пометка у ноды: лежит (или молчит) — либо жива, но видна только через панель. */
+export type NodeMark =
+  | ({ kind: "down" } & NodeDown)
+  | ({ kind: "via_panel" } & NodeViaPanel);
 
-export function downMap(list: NodeDown[] | undefined): NodeDownMap {
+export type NodeDownMap = Record<string, NodeMark>;
+
+export function downMap(status: NodeWatchStatus | null | undefined): NodeDownMap {
   const out: NodeDownMap = {};
-  for (const d of list ?? []) out[d.node_id] = d;
+  for (const v of status?.via_panel ?? []) out[v.node_id] = { kind: "via_panel", ...v };
+  // Лежащая важнее: если нода в обоих списках, остаётся красная пометка.
+  for (const d of status?.down ?? []) out[d.node_id] = { kind: "down", ...d };
   return out;
 }
 

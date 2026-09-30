@@ -52,8 +52,9 @@ export function NodeWatchCard() {
 
   if (!status) return null;
   const cfg = status.config;
-  const open = events.filter((e) => !e.ended_at);
+  const open = events.filter((e) => !e.ended_at && e.kind === "node");
   const waiting = status.down.filter((d) => !d.alerted).length;
+  const viaPanel = status.via_panel;
 
   return (
     <section className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] p-4">
@@ -76,7 +77,9 @@ export function NodeWatchCard() {
         ) : open.length > 0 ? (
           <span className="text-[var(--danger)]">Сейчас лежит: {open.length}</span>
         ) : (
-          <span className="text-[var(--success)]">Сейчас все ноды отвечают</span>
+          <span className="text-[var(--success)]">
+            {viaPanel.length > 0 ? "Сейчас лежащих нод нет" : "Сейчас все ноды отвечают"}
+          </span>
         )}
         {cfg.enabled && waiting > 0 && (
           <span className="text-[var(--warning)]">молчат, порог ещё не вышел: {waiting}</span>
@@ -88,6 +91,29 @@ export function NodeWatchCard() {
           <span className="text-[var(--warning)]">бот или чат не настроены — сообщений не будет</span>
         )}
       </div>
+
+      {cfg.enabled && viaPanel.length > 0 && (
+        <p className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--bg-row)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
+          <span className="text-[var(--text)]">
+            Рагент не достаёт, панель видит — наблюдаются только через панель: {viaPanel.length}.
+          </span>{" "}
+          {viaPanel.map((v, i) => (
+            <span key={v.node_id} title={v.host ?? undefined}>
+              {i > 0 ? ", " : ""}
+              <span className="text-[var(--text)]">{v.name}</span>
+              {v.panel_seen ? "" : " (панель сейчас молчит)"}
+            </span>
+          ))}
+          . Ноды живы; тревога будет, когда такую ноду потеряет и панель.
+        </p>
+      )}
+
+      {status.panel_lost && (
+        <p className="mt-3 rounded-lg border border-[rgba(251,191,36,0.45)] bg-[rgba(251,191,36,0.10)] px-3 py-2 text-xs text-[var(--warning)]">
+          Панель Remnawave не отвечает рагенту с {when(status.panel_lost.since)}. По нодам, которые
+          видны только через неё, тревог не будет, пока она не вернётся.
+        </p>
+      )}
 
       {status.fleet && (
         <p className="mt-3 rounded-lg border border-[rgba(251,191,36,0.45)] bg-[rgba(251,191,36,0.10)] px-3 py-2 text-xs text-[var(--warning)]">
@@ -117,8 +143,11 @@ function EventRow({ event: e }: { event: NodeOutage }) {
   const what =
     e.kind === "fleet"
       ? "рагент не видел парк — скорее всего, проблема была на его стороне"
-      : signalsText(e.signals);
-  const fleet = e.kind === "fleet";
+      : e.kind === "panel"
+        ? "панель не отвечала рагенту"
+        : signalsText(e.signals);
+  // У «парка» и «панели» те же слова: не нода лежала, а рагент чего-то не видел.
+  const fleet = e.kind !== "node";
   const closed = e.resolution ? CLOSED[e.resolution] : undefined;
 
   return (
@@ -131,21 +160,23 @@ function EventRow({ event: e }: { event: NodeOutage }) {
     >
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
         <span className="font-medium text-[var(--text)]">
-          {fleet ? `Парк: ${e.name}` : e.name}
+          {e.kind === "fleet" ? `Парк: ${e.name}` : e.kind === "panel" ? "Панель Remnawave" : e.name}
         </span>
         {e.host && <span className="font-mono text-[var(--muted)]">{e.host}</span>}
         {e.hosting && <span className="text-[var(--muted)]">{e.hosting}</span>}
         <span
           className={`ml-auto tabular-nums ${down ? "font-semibold text-[var(--danger)]" : "text-[var(--muted)]"}`}
         >
-          {down ? `${fleet ? "не видит" : "лежит"} ${lasted}` : lasted}
+          {down
+            ? `${e.kind === "panel" ? "не отвечает" : fleet ? "не видит" : "лежит"} ${lasted}`
+            : lasted}
         </span>
       </div>
       <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 tabular-nums text-[var(--muted)]">
         <span>
           {fleet ? "с" : "упала"} {when(e.started_at)}
           {e.ended_at && e.resolution === "recovered"
-            ? ` · ${fleet ? "снова видит с" : "поднялась"} ${when(e.ended_at)}`
+            ? ` · ${e.kind === "panel" ? "снова отвечает с" : fleet ? "снова видит с" : "поднялась"} ${when(e.ended_at)}`
             : ""}
         </span>
         {what && <span>{what}</span>}

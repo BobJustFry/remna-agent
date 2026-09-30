@@ -55,7 +55,7 @@ export type AppOutletContext = {
   refreshRemnawaveVersions: (force?: boolean) => Promise<RemnawaveVersions | void>;
   subwatch: SubwatchStatus | null;
   refreshSubwatch: () => Promise<SubwatchStatus | null>;
-  /** Ноды, от которых рагент не получает данных, по id: с какого времени и что молчит. */
+  /** Ноды, от которых рагент не получает данных, по id: лежат или видны только через панель. */
   nodesDown: NodeDownMap;
   refreshNodeWatch: () => Promise<unknown>;
 };
@@ -101,7 +101,7 @@ export function AppShell({ username, onLogout }: Props) {
   } = useRemnawaveVersions(true);
   const { status: subwatchStatus, refresh: refreshSubwatch } = useSubwatch(true);
   const { status: nodeWatchStatus, refresh: refreshNodeWatch } = useNodeWatch(true);
-  const nodesDown = useMemo(() => downMap(nodeWatchStatus?.down), [nodeWatchStatus]);
+  const nodesDown = useMemo(() => downMap(nodeWatchStatus), [nodeWatchStatus]);
   const scriptQueue = useScriptQueue({
     onIdle: () => {
       void refreshAgents();

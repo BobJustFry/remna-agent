@@ -12,6 +12,10 @@
   • ноды, упавшие вместе, идут одним сообщением: у одного хостера падают пачкой;
   • разом замолчало большинство — это, скорее всего, ослеп сам рагент: одно
     сообщение про парк вместо десятка про ноды;
+  • рагент до ноды не дотягивается, а панель видит её подключённой — нода
+    жива, просто не для нас (рагент стоит в России, и часть зарубежных адресов
+    ему режут). За такой нодой следим через панель: тревога — когда её
+    потеряла и панель;
   • после перезапуска рагент помнит, о чём уже сообщил (тревоги лежат в базе),
     а первый опрос после старта отказом не считает.
 
@@ -49,6 +53,7 @@ DEFAULTS = {
     "chat_id": "",                # пусто — тот же чат, что у следилки за подпиской
     "exclude": [],                # id нод, по которым не тревожим
     "skip_panel_disabled": True,  # выключенная в панели нода — не авария
+    "panel_alive": True,          # рагент не достаёт, но панель видит — нода жива
     "utc_offset": 5,              # часовой пояс владельца для времени в сообщениях, часы от UTC
 }
 
@@ -75,6 +80,13 @@ MAX_LINES = 30
 
 NODE = "node"
 FLEET = "fleet"
+PANEL = "panel"
+
+# Что опрос говорит о ноде.
+UP = "up"                # данные идут напрямую
+VIA_PANEL = "via_panel"  # рагент не достаёт, панель видит подключённой
+HELD = "held"            # следим через панель, а панель сейчас молчит — не гадаем
+SILENT = "silent"        # молчит: кандидат в тревогу
 
 RECOVERED = "recovered"
 MUTED = "muted"
@@ -149,14 +161,40 @@ class Fleet:
 
 
 @dataclass
+class Reach:
+    """Нода, до которой рагент не дотягивается: её сигнал жизни — панель."""
+
+    since: datetime
+    panel: bool | None = True   # что панель сказала в последний раз; None — промолчала
+
+
+@dataclass
+class PanelLoss:
+    """Панель Remnawave не отвечает рагенту."""
+
+    since: datetime
+    alerted_at: datetime | None = None
+    notified_at: datetime | None = None
+
+
+@dataclass
 class Watch:
     """Что переживает перезапуск, кроме самих тревог (они в node_outages)."""
 
     pending: dict[str, datetime] = field(default_factory=dict)   # молчит, порог ещё не вышел
     fleet: Fleet | None = None
+    unreached: dict[str, Reach] = field(default_factory=dict)    # наблюдаются через панель
+    panel: PanelLoss | None = None
 
     def dump(self) -> dict:
         out: dict = {"pending": {k: v.isoformat() for k, v in sorted(self.pending.items())}}
+        if self.unreached:
+            out["unreached"] = {k: {"since": v.since.isoformat(), "panel": v.panel}
+                                for k, v in sorted(self.unreached.items())}
+        if self.panel is not None:
+            out["panel"] = {"since": self.panel.since.isoformat(),
+                            "alerted_at": _iso(self.panel.alerted_at),
+                            "notified_at": _iso(self.panel.notified_at)}
         if self.fleet is not None:
             f = self.fleet
             out["fleet"] = {
@@ -184,7 +222,20 @@ class Watch:
                 alerted_at=_parse(raw.get("alerted_at")), notified_at=_parse(raw.get("notified_at")),
                 reminded_at=_parse(raw.get("reminded_at")),
             )
-        return cls(pending=pending, fleet=fleet)
+        unreached: dict[str, Reach] = {}
+        for key, value in (data.get("unreached") or {}).items():
+            since = _parse(value.get("since")) if isinstance(value, dict) else None
+            if since is not None:
+                seen = value.get("panel")
+                unreached[str(key)] = Reach(since=since,
+                                            panel=seen if isinstance(seen, bool) else None)
+        panel = None
+        raw = data.get("panel")
+        if isinstance(raw, dict) and _parse(raw.get("since")) is not None:
+            panel = PanelLoss(since=_parse(raw.get("since")),
+                              alerted_at=_parse(raw.get("alerted_at")),
+                              notified_at=_parse(raw.get("notified_at")))
+        return cls(pending=pending, fleet=fleet, unreached=unreached, panel=panel)
 
 
 @dataclass
@@ -211,7 +262,8 @@ _runtime = Runtime()
 
 @dataclass
 class Message:
-    kind: str    # down | up | remind | fleet_down | fleet_up | fleet_remind
+    # down | up | remind | fleet_down | fleet_up | fleet_remind | panel_down | panel_up
+    kind: str
     text: str
     outages: list[Outage] = field(default_factory=list)
 
@@ -224,6 +276,8 @@ class Plan:
     closed: list[tuple[Outage, datetime, str]] = field(default_factory=list)
     fleet_opened: Fleet | None = None
     fleet_closed: datetime | None = None
+    panel_opened: PanelLoss | None = None
+    panel_closed: datetime | None = None
     messages: list[Message] = field(default_factory=list)
 
 
@@ -343,16 +397,23 @@ def down_text(items: list[Outage], now: datetime, clock: Clock) -> str:
     return "\n".join([head, *_bullets(lines), f"Время — {clock.label}."])
 
 
-def up_text(items: list[Outage], now: datetime, clock: Clock) -> str:
+def up_text(items: list[Outage], now: datetime, clock: Clock,
+            via_panel: frozenset[str] = frozenset()) -> str:
+    """via_panel — id нод, которые вернулись в панель, а рагенту так и не отвечают."""
     items = sorted(items, key=lambda o: (o.since, o.name))
     if len(items) == 1:
         o = items[0]
-        return "\n".join([
-            "🟢 <b>Нода снова отвечает</b>",
+        seen = o.node_id in via_panel
+        lines = [
+            "🟢 <b>Нода снова в панели</b>" if seen else "🟢 <b>Нода снова отвечает</b>",
             _who(o),
             f"Лежала {span(now - o.since)}: с {clock.at(o.since)} до {clock.at(now)} {clock.label}.",
-        ])
-    lines = [f"• {_who(o)} — лежала {span(now - o.since)}, с {clock.at(o.since)}" for o in items]
+        ]
+        if seen:
+            lines.append("Рагент до неё по-прежнему не дотягивается — слежу через панель.")
+        return "\n".join(lines)
+    lines = [f"• {_who(o)} — лежала {span(now - o.since)}, с {clock.at(o.since)}"
+             + (" (вернулась в панель)" if o.node_id in via_panel else "") for o in items]
     return "\n".join([f"🟢 <b>Снова отвечают: {_nodes(len(items))}</b>", *_bullets(lines),
                       f"Время — {clock.label}."])
 
@@ -414,24 +475,63 @@ def fleet_up_text(fleet: Fleet, silent: list[Sighting], total: int, now: datetim
     return "\n".join(lines)
 
 
+def panel_down_text(loss: PanelLoss, watched: list[str], now: datetime, clock: Clock) -> str:
+    lines = [
+        "⚠️ <b>Рагент не видит панель Remnawave</b>",
+        f"С {clock.at(loss.since)} {clock.label}, уже {span(now - loss.since)}.",
+    ]
+    if watched:
+        names = ", ".join(html.escape(n) for n in sorted(watched)[:10])
+        more = f" и ещё {len(watched) - 10}" if len(watched) > 10 else ""
+        lines.append(f"Только через неё наблюдаются: {names}{more} — пока панель молчит, "
+                     "об их падении не узнаю.")
+    return "\n".join(lines)
+
+
+def panel_up_text(loss: PanelLoss, now: datetime, clock: Clock) -> str:
+    return "\n".join([
+        "🟢 <b>Панель Remnawave снова отвечает</b>",
+        f"Рагент не видел её с {clock.at(loss.since)} до {clock.at(now)} {clock.label} — "
+        f"{span(now - loss.since)}.",
+    ])
+
+
 # ── решение ─────────────────────────────────────────────────────────────────
 
-def _by_hosting(pool: list[Sighting]) -> dict[str, list[int]]:
+def _by_hosting(pool: list[Sighting], silent: list[Sighting]) -> dict[str, list[int]]:
+    gone = {s.node_id for s in silent}
     out: dict[str, list[int]] = {}
     for s in pool:
         pair = out.setdefault(s.hosting or "без хостера", [0, 0])
         pair[1] += 1
-        if not s.alive:
+        if s.node_id in gone:
             pair[0] += 1
     return out
 
 
+def verdict(s: Sighting, watch: Watch, use_panel: bool) -> str:
+    """Что опрос говорит о ноде: жива, жива по словам панели, неизвестно или молчит."""
+    if s.alive:
+        return UP
+    # SSH открылся — рагент до сервера достаёт, значит молчит сам агент, и панель
+    # тут ни при чём.
+    if use_panel and s.ssh is not True:
+        if s.panel is True:
+            return VIA_PANEL
+        # Следили через панель, а она сейчас про ноду ничего не говорит. Не
+        # гадаем: тревогу поднимем, только когда панель ответит «не вижу».
+        if s.panel is None and s.node_id in watch.unreached:
+            return HELD
+    return SILENT
+
+
 def step(watch: Watch, rt: Runtime, outages: dict[str, Outage], sightings: list[Sighting],
-         cfg: dict, now: datetime) -> Plan:
+         cfg: dict, now: datetime, panel_ok: bool | None = True) -> Plan:
     """Один опрос: что изменилось и о чём пора сказать.
 
     watch и rt меняются на месте. outages — открытые тревоги по id ноды: что
-    с ними делать в журнале, возвращается в плане.
+    с ними делать в журнале, возвращается в плане. panel_ok — ответила ли
+    панель на этот опрос; None — панель у рагента не настроена вовсе.
     """
     plan = Plan()
     threshold = timedelta(minutes=max(1, int(cfg.get("threshold_min") or 10)))
@@ -450,8 +550,26 @@ def step(watch: Watch, rt: Runtime, outages: dict[str, Outage], sightings: list[
     seen = {s.node_id: s for s in sightings}
     watched = {nid: s for nid, s in seen.items() if not s.muted}
 
+    # Рагент не дотягивается, а панель видит ноду подключённой — нода жива, и
+    # дальше её сигнал жизни — панель. Без панели (или с выключенной настройкой)
+    # такого состояния нет: молчит — значит молчит.
+    use_panel = bool(cfg.get("panel_alive", True)) and panel_ok is not None
+    if not use_panel:
+        watch.unreached.clear()
+    state = {nid: verdict(s, watch, use_panel) for nid, s in watched.items()}
+    for nid in list(watch.unreached):
+        s = watched.get(nid)
+        # Ответила напрямую (или открылся SSH) — рагент до неё снова достаёт.
+        if s is None or s.alive or s.ssh is True:
+            del watch.unreached[nid]
+        else:
+            watch.unreached[nid].panel = s.panel
+    for nid, kind in state.items():
+        if kind == VIA_PANEL and nid not in watch.unreached:
+            watch.unreached[nid] = Reach(since=now)
+
     # Открытые тревоги: снять те, за чьими нодами больше не следим (молча), и
-    # те, чьи ноды ответили (с сообщением).
+    # те, чьи ноды ответили или вернулись в панель (с сообщением).
     still: dict[str, Outage] = {}
     back: list[Outage] = []
     for nid, o in outages.items():
@@ -460,23 +578,23 @@ def step(watch: Watch, rt: Runtime, outages: dict[str, Outage], sightings: list[
             plan.closed.append((o, now, REMOVED))
         elif s.muted:
             plan.closed.append((o, now, MUTED))
-        elif s.alive:
+        elif state[nid] in (UP, VIA_PANEL):
             plan.closed.append((o, now, RECOVERED))
             back.append(o)
         else:
             o.signals = s.signals()   # для напоминания: что молчит сейчас, а не тогда
             still[nid] = o
     if back:
-        plan.messages.append(Message("up", up_text(back, now, clock), back))
+        via = frozenset(o.node_id for o in back if state[o.node_id] == VIA_PANEL)
+        plan.messages.append(Message("up", up_text(back, now, clock, via), back))
 
     # Ответила раньше порога — моргнула сеть, это не тревога.
     for nid in list(watch.pending):
-        s = watched.get(nid)
-        if s is None or s.alive:
+        if state.get(nid) in (None, UP, VIA_PANEL):
             del watch.pending[nid]
 
     pool = [s for nid, s in watched.items() if nid not in still]
-    silent = [s for s in pool if not s.alive]
+    silent = [s for s in pool if state[s.node_id] == SILENT]
     if not first:
         for s in silent:
             watch.pending.setdefault(s.node_id, now)
@@ -486,7 +604,8 @@ def step(watch: Watch, rt: Runtime, outages: dict[str, Outage], sightings: list[
     if majority and (watch.fleet is not None or not first):
         fleet = watch.fleet or Fleet(since=now)
         watch.fleet = fleet
-        fleet.down, fleet.total, fleet.by_hosting = len(silent), len(pool), _by_hosting(pool)
+        fleet.down, fleet.total = len(silent), len(pool)
+        fleet.by_hosting = _by_hosting(pool, silent)
         if fleet.alerted_at is None and now - max(fleet.since, rt.trusted_from) >= threshold:
             fleet.alerted_at = now
             plan.fleet_opened = fleet
@@ -508,10 +627,32 @@ def step(watch: Watch, rt: Runtime, outages: dict[str, Outage], sightings: list[
             plan.messages.append(Message(
                 "fleet_up", fleet_up_text(fleet, silent, len(pool), now, threshold, clock)))
 
+    # Панель не отвечает дольше порога — одно сообщение про саму панель. Пока
+    # рагент слеп целиком (ветка выше), сюда не доходим: это та же беда.
+    if panel_ok is False:
+        if watch.panel is None and not first:
+            watch.panel = PanelLoss(since=now)
+        loss = watch.panel
+        if loss is not None:
+            if loss.alerted_at is None and now - max(loss.since, rt.trusted_from) >= threshold:
+                loss.alerted_at = now
+                plan.panel_opened = loss
+            if loss.alerted_at is not None and loss.notified_at is None and may_send:
+                names = [watched[nid].name for nid in watch.unreached if nid in watched]
+                plan.messages.append(Message(
+                    "panel_down", panel_down_text(loss, names, now, clock)))
+    elif watch.panel is not None:
+        loss, watch.panel = watch.panel, None
+        if loss.alerted_at is not None:
+            plan.panel_closed = now
+            plan.messages.append(Message("panel_up", panel_up_text(loss, now, clock)))
+
     def age(nid: str) -> timedelta:
         return now - max(watch.pending[nid], rt.trusted_from)
 
-    due = [nid for nid in watch.pending if age(nid) >= threshold]
+    # HELD сюда не попадает: нода, за которой следим через панель, дозревает до
+    # тревоги, только пока панель прямо говорит «не вижу».
+    due = [nid for nid in watch.pending if age(nid) >= threshold and state[nid] == SILENT]
     if due:
         # Кто-то вот-вот дозреет — подождём его, но не дольше окна.
         window = min(GROUP_WINDOW, threshold / 2)
@@ -619,6 +760,15 @@ async def _db_apply(db: AsyncSession, plan: Plan, watch: Watch, before: dict) ->
         await db.execute(update(NodeOutage)
                          .where(NodeOutage.kind == FLEET, NodeOutage.ended_at.is_(None))
                          .values(ended_at=plan.fleet_closed, resolution=RECOVERED))
+    if plan.panel_opened is not None:
+        p = plan.panel_opened
+        db.add(NodeOutage(
+            kind=PANEL, node_id=None, node_name="панель Remnawave", host=None, hosting=None,
+            started_at=p.since, alerted_at=p.alerted_at or _now(), signals={"panel": False}))
+    if plan.panel_closed is not None:
+        await db.execute(update(NodeOutage)
+                         .where(NodeOutage.kind == PANEL, NodeOutage.ended_at.is_(None))
+                         .values(ended_at=plan.panel_closed, resolution=RECOVERED))
     # Состояние пишем, только когда оно изменилось: опрос идёт раз в полминуты.
     if watch.dump() != before:
         await _save_json(db, STATE_KEY, watch.dump())
@@ -627,7 +777,8 @@ async def _db_apply(db: AsyncSession, plan: Plan, watch: Watch, before: dict) ->
 
 async def _db_delivered(db: AsyncSession, when: datetime, notified: list[uuid.UUID],
                         reminded: list[uuid.UUID], watch: Watch | None) -> None:
-    """Отметить, о чём удалось сказать. watch — если отметка легла в эпизод «парк»."""
+    """Отметить, о чём удалось сказать. watch — если отметка легла в состояние
+    (эпизод «парк» или «панель»), а не в строку журнала."""
     if notified:
         await db.execute(update(NodeOutage).where(NodeOutage.id.in_(notified))
                          .values(notified_at=when))
@@ -657,13 +808,13 @@ async def _can_notify(db: AsyncSession, cfg: dict) -> bool:
 # ── один опрос ──────────────────────────────────────────────────────────────
 
 async def tick(db: AsyncSession, cfg: dict, sightings: list[Sighting],
-               now: datetime | None = None) -> Plan:
+               now: datetime | None = None, panel_ok: bool | None = True) -> Plan:
     """Принять наблюдения опроса, обновить журнал и сказать в чат, что положено."""
     now = now or _now()
     rt = _runtime
     watch, outages = await _db_load(db)
     before = watch.dump()
-    plan = step(watch, rt, outages, sightings, cfg, now)
+    plan = step(watch, rt, outages, sightings, cfg, now, panel_ok)
     await _db_apply(db, plan, watch, before)
 
     if not await _can_notify(db, cfg):
@@ -685,7 +836,7 @@ async def tick(db: AsyncSession, cfg: dict, sightings: list[Sighting],
 
     notified: list[uuid.UUID] = []
     reminded: list[uuid.UUID] = []
-    fleet_touched = False
+    fleet_touched = False   # отметка легла в состояние, а не в строку журнала
     for msg in plan.messages:
         err = await _send(db, cfg, msg.text)
         if err:
@@ -705,6 +856,9 @@ async def tick(db: AsyncSession, cfg: dict, sightings: list[Sighting],
             fleet_touched = True
         elif msg.kind == "fleet_remind" and watch.fleet is not None:
             watch.fleet.reminded_at = now
+            fleet_touched = True
+        elif msg.kind == "panel_down" and watch.panel is not None:
+            watch.panel.notified_at = now
             fleet_touched = True
     if notified or reminded or fleet_touched:
         await _db_delivered(db, now, notified, reminded, watch if fleet_touched else None)
@@ -745,7 +899,7 @@ async def _knock(host: str, port: int) -> bool:
 
 async def observe(db: AsyncSession, nodes: list[Node],
                   agents: dict[str, tuple[bool | None, str | None]],
-                  panel: dict[str, dict]) -> None:
+                  panel: dict[str, dict], panel_ok: bool | None = True) -> None:
     """Вход от сэмплера метрик: раз в опрос, со всеми нодами сразу.
 
     agents — по id ноды: (ответил ли агент сейчас, почему нет); None вместо
@@ -801,7 +955,7 @@ async def observe(db: AsyncSession, nodes: list[Node],
         else:
             rt.knocked_ok.pop(s.node_id, None)
 
-    await tick(db, cfg, sightings, now)
+    await tick(db, cfg, sightings, now, panel_ok)
 
     if rt.last_prune is None or now - rt.last_prune > timedelta(days=1):
         rt.last_prune = now
@@ -810,8 +964,27 @@ async def observe(db: AsyncSession, nodes: list[Node],
 
 # ── для интерфейса ──────────────────────────────────────────────────────────
 
-async def current(db: AsyncSession) -> tuple[list[dict], dict | None]:
-    """Кто молчит прямо сейчас: поднятые тревоги и те, у кого порог ещё не вышел."""
+async def _nodes_by_id(db: AsyncSession, keys) -> dict[str, Node]:
+    ids = []
+    for nid in keys:
+        try:
+            ids.append(uuid.UUID(nid))
+        except ValueError:
+            continue
+    if not ids:
+        return {}
+    found = await db.execute(select(Node).options(selectinload(Node.hosting))
+                             .where(Node.id.in_(ids)))
+    return {str(n.id): n for n in found.scalars()}
+
+
+async def current(db: AsyncSession) -> dict:
+    """Что следилка знает прямо сейчас.
+
+    down — поднятые тревоги и те, у кого порог ещё не вышел; via_panel — ноды,
+    до которых рагент не достаёт и которые наблюдаются через панель; fleet и
+    panel_lost — рагент не видит парк или панель.
+    """
     watch = Watch.load(await _json_setting(db, STATE_KEY, {}))
     rows = await db.execute(
         select(NodeOutage).where(NodeOutage.kind == NODE, NodeOutage.ended_at.is_(None),
@@ -824,26 +997,33 @@ async def current(db: AsyncSession) -> tuple[list[dict], dict | None]:
     # Молчит меньше пары минут — ещё не повод рисовать пометку: моргнула сеть.
     floor = _now() - MARK_AFTER
     waiting = {nid: since for nid, since in watch.pending.items() if since <= floor}
-    if waiting:
-        ids = []
-        for nid in waiting:
-            try:
-                ids.append(uuid.UUID(nid))
-            except ValueError:
-                continue
-        found = await db.execute(select(Node).options(selectinload(Node.hosting))
-                                 .where(Node.id.in_(ids)))
-        for node in found.scalars():
-            down.append({"node_id": str(node.id), "name": node.name, "host": node.host,
-                         "hosting": node.hosting.name if node.hosting is not None else None,
-                         "since": waiting[str(node.id)], "alerted": False, "signals": {}})
+    # Через панель наблюдаем тех, про кого она не сказала «не вижу»: сказала —
+    # это уже молчащая нода, она среди down.
+    busy = {d["node_id"] for d in down} | set(watch.pending)
+    reach = {nid: r for nid, r in watch.unreached.items()
+             if nid not in busy and r.panel is not False}
+    nodes = await _nodes_by_id(db, [*waiting, *reach])
+
+    def card(node: Node) -> dict:
+        return {"node_id": str(node.id), "name": node.name, "host": node.host,
+                "hosting": node.hosting.name if node.hosting is not None else None}
+
+    for nid, since in waiting.items():
+        if nid in nodes:
+            down.append({**card(nodes[nid]), "since": since, "alerted": False, "signals": {}})
+    via_panel = [{**card(nodes[nid]), "since": r.since, "panel_seen": r.panel is True}
+                 for nid, r in reach.items() if nid in nodes]
+    via_panel.sort(key=lambda item: item["name"])
 
     fleet = None
     if watch.fleet is not None:
         f = watch.fleet
         fleet = {"since": f.since, "alerted": f.alerted_at is not None,
                  "down": f.down, "total": f.total}
-    return down, fleet
+    panel_lost = None
+    if watch.panel is not None:
+        panel_lost = {"since": watch.panel.since, "alerted": watch.panel.alerted_at is not None}
+    return {"down": down, "via_panel": via_panel, "fleet": fleet, "panel_lost": panel_lost}
 
 
 async def events(db: AsyncSession, days: int = 30, limit: int = 200) -> list[NodeOutage]:

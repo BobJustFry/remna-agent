@@ -866,6 +866,8 @@ export type NodeWatchConfig = {
   /** id нод, по которым не тревожим. */
   exclude: string[];
   skip_panel_disabled: boolean;
+  /** Рагент до ноды не достаёт, но панель видит её подключённой — нода жива. */
+  panel_alive: boolean;
   /** Часовой пояс времени в сообщениях, часы от UTC. */
   utc_offset: number;
   bot_ready: boolean;
@@ -890,18 +892,32 @@ export type NodeDown = {
   signals: NodeSignals;
 };
 
+/** Нода, до которой рагент не дотягивается: наблюдается через панель. */
+export type NodeViaPanel = {
+  node_id: string;
+  name: string;
+  host: string | null;
+  hosting: string | null;
+  since: string;
+  /** false — панель сейчас про ноду молчит: жива ли она, неизвестно. */
+  panel_seen: boolean;
+};
+
 export type NodeWatchStatus = {
   config: NodeWatchConfig;
   down: NodeDown[];
+  via_panel: NodeViaPanel[];
   /** Рагент разом перестал видеть большинство нод. */
   fleet: { since: string; alerted: boolean; down: number; total: number } | null;
+  /** Панель не отвечает рагенту. */
+  panel_lost: { since: string; alerted: boolean } | null;
 };
 
 export type NodeWatchUpdate = Partial<Omit<NodeWatchConfig, "bot_ready">>;
 
 export type NodeOutage = {
   id: string;
-  kind: "node" | "fleet";
+  kind: "node" | "fleet" | "panel";
   node_id: string | null;
   name: string;
   host: string | null;

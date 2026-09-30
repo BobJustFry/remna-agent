@@ -12,9 +12,11 @@ from app.schemas import (
     FleetBlindOut,
     NodeDownOut,
     NodeOutageOut,
+    NodeViaPanelOut,
     NodeWatchConfigOut,
     NodeWatchConfigUpdate,
     NodeWatchStatusOut,
+    PanelLostOut,
 )
 from app.services import node_watch, subwatch
 from app.services.telegram import send_message
@@ -32,11 +34,13 @@ async def _config_out(db: AsyncSession, cfg: dict) -> NodeWatchConfigOut:
 
 async def _status(db: AsyncSession) -> NodeWatchStatusOut:
     cfg = await node_watch.get_config(db)
-    down, fleet = await node_watch.current(db)
+    now = await node_watch.current(db)
     return NodeWatchStatusOut(
         config=await _config_out(db, cfg),
-        down=[NodeDownOut(**d) for d in down],
-        fleet=FleetBlindOut(**fleet) if fleet else None,
+        down=[NodeDownOut(**d) for d in now["down"]],
+        via_panel=[NodeViaPanelOut(**d) for d in now["via_panel"]],
+        fleet=FleetBlindOut(**now["fleet"]) if now["fleet"] else None,
+        panel_lost=PanelLostOut(**now["panel_lost"]) if now["panel_lost"] else None,
     )
 
 

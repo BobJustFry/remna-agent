@@ -73,15 +73,19 @@ async def sample_once() -> int:
         # Онлайн ядра Xray приходит от панели Remnawave — один запрос на весь тик,
         # а не по ноде. Панель может быть недоступна: тогда пишем None, а не ноль,
         # иначе на графике появится провал, которого не было.
-        from app.services.remnawave_api import rw_fleet_by_address, users_online
+        from app.services.remnawave_api import rw_configured, rw_fleet, users_online
 
-        online_task = asyncio.to_thread(rw_fleet_by_address)
+        online_task = asyncio.to_thread(rw_fleet)
         agent_pairs = await asyncio.gather(*(one_agent(n) for n in nodes), return_exceptions=True)
         try:
-            panel = await online_task
+            answer = await online_task
         except Exception:
             log.warning("xray online unavailable this tick")
-            panel = {}
+            answer = None
+        panel = answer or {}
+        # Ответила ли панель: следилке за нодами важно отличать «панель ноду не
+        # видит» от «панель молчит». None — панели у рагента нет вовсе.
+        panel_ok = (answer is not None) if rw_configured() else None
         by_address = users_online(panel)
         agents: dict[str, object] = {}
         for item in agent_pairs:
@@ -132,7 +136,8 @@ async def sample_once() -> int:
         # графикам отсчёта, поэтому после записи и в своём try.
         try:
             await node_watch.observe(
-                db, nodes, {str(n.id): _answered(n, agents.get(str(n.id))) for n in nodes}, panel)
+                db, nodes, {str(n.id): _answered(n, agents.get(str(n.id))) for n in nodes},
+                panel, panel_ok)
         except Exception:
             log.exception("node watch failed")
             await db.rollback()

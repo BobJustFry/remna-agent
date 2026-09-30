@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { api, type NodeDown } from "../api/client";
+import { api } from "../api/client";
 import type {
   AgentMap,
   MetricPoint,
@@ -14,7 +14,7 @@ import { CountryFlag } from "./CountryFlag";
 import { NodeMetricLineChart } from "./NodeMetricCharts";
 import { NodeMetricSpark } from "./NodeMetricSpark";
 import { inboundPeerCount, inboundPeerFromXray } from "../lib/inboundPeerCount";
-import type { NodeDownMap } from "../lib/nodeWatch";
+import type { NodeDownMap, NodeMark } from "../lib/nodeWatch";
 import { pingToneClass } from "../lib/pingTone";
 import { capacityLabel, capacityTitle, capacityToneClass } from "../lib/capacityTone";
 import { bandwidthTitle, bandwidthToneClass, formatUpDown } from "../lib/bandwidth";
@@ -248,7 +248,7 @@ function NodeTile({
   fromTs: number;
   toTs: number;
   status: OnlineMap[string] | undefined;
-  down: NodeDown | undefined;
+  down: NodeMark | undefined;
   agent: AgentMap[string] | undefined;
   xrayOnline: number | null;
   inboundIps: number | null;
@@ -258,6 +258,7 @@ function NodeTile({
 }) {
   const cpuLive = agent?.present ? agent.cpu_percent : null;
   const diskLive = agent?.present ? agent.disk_percent : null;
+  const cfLive = agent?.present && agent.cf204_ok ? agent.cf204_ms : null;
   const capacity = agent?.present ? agent.capacity_comfort : null;
   // Линия онлайна красится по той же шкале, что и само число, иначе плитка
   // говорила бы две разные вещи об одном показателе.
@@ -318,21 +319,32 @@ function NodeTile({
           toTs={toTs}
           refY={capacity ?? undefined}
           title={capacityTitle(xrayOnline, capacity, agent?.capacity_limiter)}
+          aside={
+            // Входящие IP — рядом с онлайном: это тоже про людей. Истории у них
+            // нет, поэтому только число, без линии.
+            <span
+              className={`shrink-0 whitespace-nowrap text-[9px] ${peersToneClass(inboundIps)}`}
+              title={
+                inboundFromXray
+                  ? "Уникальные клиентские IP из Xray за 15 мин (ss не видит localhost/CDN). Только текущее число — истории нет."
+                  : "Уникальные входящие IP (ss) сейчас. Только текущее число — истории нет."
+              }
+            >
+              {fmtCount(inboundIps)}
+              <span className="font-normal text-[var(--muted)]"> IP</span>
+            </span>
+          }
         />
         <SparkRow
-          label="вх. IP"
-          value={fmtCount(inboundIps)}
-          valueClass={peersToneClass(inboundIps)}
+          label="cf_204"
+          value={fmtMs(cfLive)}
+          valueClass={agent?.present ? pingToneClass(cfLive) : "font-semibold tabular-nums text-[var(--muted)]"}
           color={PING}
           times={times}
           values={points.map((p) => p.ping_ms)}
           fromTs={fromTs}
           toTs={toTs}
-          title={
-            inboundFromXray
-              ? "Цифра — уникальные клиентские IP из Xray за 15 мин (ss не видит localhost/CDN). График — cf_204 за сутки."
-              : "Цифра — уникальные входящие IP (ss). График — cf_204 за сутки."
-          }
+          title="Задержка cf_204: запрос с ноды к Cloudflare (generate_204), мс. Цифра — сейчас, линия — за выбранный период. Это задержка, а не число людей."
         />
         <SparkRow
           label="CPU"
@@ -461,11 +473,14 @@ function SparkRow({
   refY,
   title,
   dim,
+  aside,
 }: {
   label: string;
   value: string;
   color: string;
   valueClass?: string;
+  /** Второе число в строке подписи, справа: у него своя подсказка и нет своей линии. */
+  aside?: ReactNode;
   times: number[];
   values: Array<number | null>;
   fromTs: number;
@@ -478,7 +493,13 @@ function SparkRow({
   return (
     <div className="flex min-h-0 items-stretch gap-1" title={title}>
       <div className="w-[68px] shrink-0 leading-tight">
-        <div className="text-[9px] uppercase tracking-wide text-[var(--muted)]">{label}</div>
+        <div className="flex min-w-0 items-baseline justify-between gap-1">
+          {/* Места впритык: при четырёхзначном числе справа подпись обрежется, а не наедет на линию. */}
+          <span className="min-w-0 truncate text-[9px] uppercase tracking-wide text-[var(--muted)]">
+            {label}
+          </span>
+          {aside}
+        </div>
         <div
           className={`truncate text-[11px] ${valueClass ?? "font-semibold tabular-nums"}`}
           style={valueClass ? undefined : { color }}

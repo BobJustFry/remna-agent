@@ -38,6 +38,9 @@ class Harness(unittest.IsolatedAsyncioTestCase):
         self.muted: set[str] = set()
         self.gone: set[str] = set()
         self.ssh_alive: set[str] = set()      # агент молчит, а SSH открывается
+        self.far: set[str] = set()            # рагент не дотягивается, панель видит
+        self.panel_ok: bool | None = True     # False — панель не ответила, None — её нет
+        self.panel_sees_all = False           # панель видит и те ноды, что молчат рагенту
         self.no_agent: set[str] = set()       # нод без агента
         self.state: dict = {}                 # app_settings[node_watch_state]
         self.rows: dict[uuid.UUID, dict] = {}  # «таблица» node_outages
@@ -66,6 +69,14 @@ class Harness(unittest.IsolatedAsyncioTestCase):
                 for r in self.rows.values():
                     if r["kind"] == nw.FLEET and r["ended"] is None:
                         r.update(ended=plan.fleet_closed, resolution=nw.RECOVERED)
+            if plan.panel_opened is not None:
+                self.rows[uuid.uuid4()] = {"kind": nw.PANEL, "o": None, "ended": None,
+                                           "resolution": None,
+                                           "since": plan.panel_opened.since}
+            if plan.panel_closed is not None:
+                for r in self.rows.values():
+                    if r["kind"] == nw.PANEL and r["ended"] is None:
+                        r.update(ended=plan.panel_closed, resolution=nw.RECOVERED)
             # Через JSON, как в настоящей базе: несериализуемое тут и всплывёт.
             self.state = json.loads(json.dumps(watch.dump()))
 
@@ -100,17 +111,20 @@ class Harness(unittest.IsolatedAsyncioTestCase):
             if nid in self.gone:
                 continue
             down = nid in silent
-            agent = None if nid in self.no_agent else not down
-            ssh = None if agent else (nid in self.ssh_alive or (agent is None and not down))
+            cut = down or nid in self.far          # рагенту не отвечает ни агент, ни SSH
+            agent = None if nid in self.no_agent else not cut
+            ssh = None if agent else (nid in self.ssh_alive or (agent is None and not cut))
+            panel = (self.panel_sees_all or not down) if self.panel_ok else None
             out.append(nw.Sighting(
                 node_id=nid, name=self.names[nid], host=f"10.0.0.{self.ids.index(nid) + 1}",
-                hosting=self.hosting[nid], agent=agent, ssh=ssh, panel=not down,
+                hosting=self.hosting[nid], agent=agent, ssh=ssh, panel=panel,
                 muted=nid in self.muted))
         return out
 
     async def poll(self, silent=()) -> nw.Plan:
         """Один опрос в текущий момент; часы после него уходят на полминуты вперёд."""
-        plan = await nw.tick(None, self.cfg, self.sightings(set(silent)), self.now)
+        plan = await nw.tick(None, self.cfg, self.sightings(set(silent)), self.now,
+                             self.panel_ok)
         self.now += POLL
         return plan
 
@@ -485,6 +499,185 @@ class SignalTests(Harness):
         self.assertIn("Агента нет · SSH молчит", self.sent[0])
 
 
+class PanelTests(Harness):
+    """Рагент до ноды не дотягивается, а панель её видит: нода жива, следим через панель."""
+
+    async def asyncSetUp(self) -> None:
+        await super().asyncSetUp()
+        self.trio = self.ids[:3]
+        self.far.update(self.trio)
+
+    async def test_node_the_panel_sees_is_not_an_outage(self) -> None:
+        await self.warm_up()
+        await self.run_for(24 * 60)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.rows, {})
+        self.assertEqual(self.state["pending"], {})
+        self.assertEqual(sorted(self.state["unreached"]), sorted(self.trio))
+        self.assertTrue(all(r["panel"] is True for r in self.state["unreached"].values()))
+
+    async def test_panel_losing_the_node_is_the_real_outage_and_its_return_the_recovery(self) -> None:
+        await self.warm_up()
+        a = self.trio[0]
+        await self.run_for(9.5, {a})                 # панель перестала видеть ноду
+        self.assertEqual(self.sent, [])
+        await self.run_for(1.5, {a})
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("Нода недоступна", self.sent[0])
+        self.assertIn("N1", self.sent[0])
+        self.assertIn("Агент молчит · SSH молчит · панель не видит", self.sent[0])
+        self.assertEqual(len(self.open_rows()), 1)
+
+        await self.run_for(20, {a})
+        self.assertEqual(len(self.sent), 1)
+        await self.poll()                            # вернулась в панель; рагент всё так же не достаёт
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("Нода снова в панели", self.sent[1])
+        self.assertIn("Лежала 31 мин", self.sent[1])
+        self.assertIn("слежу через панель", self.sent[1])
+        self.assertEqual(self.open_rows(), [])
+        self.assertIn(a, self.state["unreached"])
+        await self.run_for(60)
+        self.assertEqual(len(self.sent), 2)
+
+    async def test_panel_blinking_on_the_node_is_not_an_alarm(self) -> None:
+        await self.warm_up()
+        await self.run_for(8, {self.trio[0]})
+        await self.run_for(30)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.rows, {})
+
+    async def test_short_panel_failure_raises_nothing(self) -> None:
+        await self.warm_up()
+        self.panel_ok = False
+        await self.run_for(8)
+        self.panel_ok = True
+        await self.run_for(30)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.rows, {})
+
+    async def test_long_panel_failure_is_one_message_about_the_panel_not_the_nodes(self) -> None:
+        await self.warm_up()
+        self.panel_ok = False
+        await self.run_for(60)
+        self.assertEqual(len(self.sent), 1)
+        text = self.sent[0]
+        self.assertIn("Рагент не видит панель Remnawave", text)
+        self.assertIn("Только через неё наблюдаются: N1, N2, N3", text)
+        self.assertEqual(self.open_rows(), [])                 # по нодам тревог нет
+        self.assertEqual(len(self.open_rows(nw.PANEL)), 1)
+        self.assertTrue(all(r["panel"] is None for r in self.state["unreached"].values()))
+
+        self.panel_ok = True
+        await self.poll()
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("Панель Remnawave снова отвечает", self.sent[1])
+        self.assertEqual(self.open_rows(nw.PANEL), [])
+        await self.run_for(30)
+        self.assertEqual(len(self.sent), 2)
+
+    async def test_node_that_answered_the_agent_still_alarms_while_the_panel_is_down(self) -> None:
+        await self.warm_up()
+        self.panel_ok = False
+        d = self.ids[5]
+        await self.run_for(8, {d})
+        self.assertEqual(self.sent, [])
+        await self.run_for(4, {d})
+        downs = [t for t in self.sent if "Нода недоступна" in t]
+        self.assertEqual(len(downs), 1)
+        self.assertIn("N6", downs[0])
+        self.assertTrue(downs[0].endswith("Агент молчит · SSH молчит"))   # про панель — ни слова
+        self.assertEqual([r["o"].node_id for r in self.open_rows()], [d])
+
+    async def test_no_alarm_is_raised_while_the_panel_cannot_say(self) -> None:
+        await self.warm_up()
+        a = self.trio[0]
+        await self.run_for(5, {a})        # панель потеряла ноду…
+        self.panel_ok = False
+        await self.run_for(8, {a})        # …и замолчала сама: про ноду ничего не известно
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.open_rows(), [])
+        # Панель вернулась и подтвердила: ноды нет. Молчание непрерывное — тревога сразу.
+        self.panel_ok = True
+        await self.poll({a})
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("Нода недоступна", self.sent[0])
+        self.assertIn("с 03:00 МСК", self.sent[0])
+
+    async def test_panel_back_with_the_node_in_place_clears_the_suspicion(self) -> None:
+        await self.warm_up()
+        a = self.trio[0]
+        await self.run_for(5, {a})
+        self.panel_ok = False
+        await self.run_for(8, {a})
+        self.panel_ok = True
+        await self.run_for(30)            # панель вернулась — и ноду видит
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.state["pending"], {})
+
+    async def test_the_setting_can_be_switched_off(self) -> None:
+        self.cfg["panel_alive"] = False
+        self.far = {self.trio[0]}
+        await self.warm_up()
+        await self.run_for(12)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("Нода недоступна", self.sent[0])
+        self.assertIn("Агент молчит · SSH молчит · панель видит", self.sent[0])
+        self.assertNotIn("unreached", self.state)
+
+    async def test_without_a_panel_silence_is_just_silence(self) -> None:
+        self.panel_ok = None              # панель у рагента не настроена
+        self.far = {self.trio[0]}
+        await self.warm_up()
+        await self.run_for(12)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("Нода недоступна", self.sent[0])
+        self.assertNotIn("unreached", self.state)
+
+    async def test_nodes_seen_by_the_panel_do_not_make_a_majority(self) -> None:
+        self.far = set(self.ids[:7])      # до семи из десяти рагент не достаёт — панель видит все
+        await self.warm_up()
+        await self.run_for(30)
+        self.assertEqual(self.sent, [])
+        self.assertNotIn("fleet", self.state)
+        self.assertEqual(self.rows, {})
+        # А настоящая гибель двух из трёх оставшихся — обычная тревога по нодам.
+        await self.run_for(12, set(self.ids[7:9]))
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("Недоступны: 2 ноды", self.sent[0])
+
+    async def test_server_that_answers_ssh_is_not_excused_by_the_panel(self) -> None:
+        """SSH открывается — рагент до сервера достаёт, значит упал именно агент."""
+        self.far = set()
+        d = self.ids[5]
+        self.ssh_alive.add(d)
+        self.panel_sees_all = True
+        await self.warm_up()
+        await self.run_for(12, {d})
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("Нода жива, но агент не отдаёт данные", self.sent[0])
+        self.assertIn("Агент молчит · SSH отвечает · панель видит", self.sent[0])
+        self.assertNotIn("unreached", self.state)
+
+    async def test_node_that_starts_answering_directly_leaves_the_panel_watch(self) -> None:
+        await self.warm_up()
+        a = self.trio[0]
+        self.assertIn(a, self.state["unreached"])
+        self.far.discard(a)
+        await self.poll()
+        self.assertNotIn(a, self.state["unreached"])
+        self.assertEqual(self.sent, [])
+
+    async def test_restart_during_a_panel_failure_does_not_alarm(self) -> None:
+        await self.warm_up()
+        self.restart()
+        self.panel_ok = False
+        await self.run_for(9)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.open_rows(), [])
+        self.assertEqual(sorted(self.state["unreached"]), sorted(self.trio))
+
+
 class DeliveryTests(Harness):
     async def test_undelivered_alarm_is_retried_but_not_every_poll(self) -> None:
         await self.warm_up()
@@ -523,6 +716,29 @@ class DeliveryTests(Harness):
         self.assertEqual(len(self.sent), 2)
         self.assertIn("Нода снова отвечает", self.sent[1])
 
+    async def test_bot_configured_later_gets_one_message_about_what_is_still_down(self) -> None:
+        self.bot = False                  # бот и чат не заданы вовсе
+        await self.warm_up()
+        a, b, c = self.ids[:3]
+        await self.run_for(15, {a})       # упала и поднялась, пока бота не было
+        await self.run_for(30)
+        await self.run_for(15, {b})       # упали и лежат до сих пор — в разное время
+        await self.run_for(60, {b, c})
+        self.assertEqual(self.sent, [])
+        self.assertEqual(len(self.rows), 3)
+        self.assertEqual(len(self.open_rows()), 2)
+
+        self.bot = True
+        await self.poll({b, c})
+        self.assertEqual(len(self.sent), 1)             # одно сообщение, а не пачка
+        text = self.sent[0]
+        self.assertIn("Недоступны: 2 ноды", text)
+        self.assertIn("N2", text)
+        self.assertIn("N3", text)
+        self.assertNotIn("N1", text)                    # поднявшаяся не досылается
+        await self.run_for(30, {b, c})
+        self.assertEqual(len(self.sent), 1)
+
     async def test_notifications_off_keeps_the_journal_and_stays_silent(self) -> None:
         self.cfg["notify"] = False
         await self.warm_up()
@@ -558,8 +774,9 @@ class ObserveTests(unittest.IsolatedAsyncioTestCase):
         async def get_config(_db):
             return self.cfg
 
-        async def tick(_db, _cfg, sightings, _now=None):
+        async def tick(_db, _cfg, sightings, _now=None, panel_ok=True):
             self.seen = sightings
+            self.panel_ok = panel_ok
             return nw.Plan()
 
         async def knock(host, port):
@@ -651,6 +868,12 @@ class ObserveTests(unittest.IsolatedAsyncioTestCase):
         await nw.observe(None, self.nodes, self.agents({b}), {})     # панель не ответила
         self.assertTrue(next(x for x in self.seen if x.node_id == b).muted)
 
+    async def test_panel_answer_state_is_passed_on(self) -> None:
+        await nw.observe(None, self.nodes, self.agents(), {}, False)
+        self.assertIs(self.panel_ok, False)
+        await nw.observe(None, self.nodes, self.agents(), {}, None)
+        self.assertIsNone(self.panel_ok)
+
     async def test_switched_off_watcher_stands_down_once_and_stays_out(self) -> None:
         self.cfg["enabled"] = False
         await nw.observe(None, self.nodes, self.agents(set(self.ids)), {})
@@ -728,17 +951,32 @@ class StateTests(unittest.TestCase):
             pending={"a": T0},
             fleet=nw.Fleet(since=T0, down=7, total=10, by_hosting={"Alpha": [5, 5]},
                            alerted_at=T0 + timedelta(minutes=10)))
+        watch.unreached = {"b": nw.Reach(since=T0, panel=None)}
+        watch.panel = nw.PanelLoss(since=T0, alerted_at=T0 + timedelta(minutes=10))
         again = nw.Watch.load(json.loads(json.dumps(watch.dump())))
+        self.assertEqual(again.unreached, {"b": nw.Reach(since=T0, panel=None)})
+        self.assertEqual(again.panel.alerted_at, T0 + timedelta(minutes=10))
+        self.assertIsNone(again.panel.notified_at)
         self.assertEqual(again.pending, {"a": T0})
         self.assertEqual(again.fleet.down, 7)
         self.assertEqual(again.fleet.alerted_at, T0 + timedelta(minutes=10))
         self.assertIsNone(again.fleet.notified_at)
 
     def test_garbage_state_is_an_empty_state(self) -> None:
-        for junk in (None, [], {"pending": {"a": "не дата"}, "fleet": {"since": None}}):
+        for junk in (None, [], {"pending": {"a": "не дата"}, "fleet": {"since": None},
+                                "unreached": {"b": "мусор"}, "panel": []}):
             watch = nw.Watch.load(junk)
             self.assertEqual(watch.pending, {})
             self.assertIsNone(watch.fleet)
+            self.assertEqual(watch.unreached, {})
+            self.assertIsNone(watch.panel)
+
+    def test_state_written_before_the_panel_rule_still_loads(self) -> None:
+        """Состояние с прода до этой правки: ключей unreached и panel в нём нет."""
+        watch = nw.Watch.load({"pending": {"a": T0.isoformat()}})
+        self.assertEqual(watch.pending, {"a": T0})
+        self.assertEqual(watch.unreached, {})
+        self.assertIsNone(watch.panel)
 
 
 if __name__ == "__main__":

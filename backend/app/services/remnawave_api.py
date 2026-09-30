@@ -76,20 +76,32 @@ def rw_nodes() -> list[dict]:
     return out if isinstance(out, list) else []
 
 
+def rw_configured() -> bool:
+    """Задана ли у рагента панель Remnawave."""
+    return _configured()
+
+
 def rw_fleet_by_address() -> dict[str, dict]:
+    """Что панель знает о каждой ноде, по адресу ноды. Returns {} when Remnawave
+    is not configured or errors — an unavailable panel must not blank out the
+    whole agents view."""
+    return rw_fleet() or {}
+
+
+def rw_fleet() -> dict[str, dict] | None:
     """Что панель знает о каждой ноде, по адресу ноды.
 
     {адрес: {"users": онлайн ядра | None, "connected": bool | None, "disabled": bool}}.
     Один запрос на всё: и онлайн для графиков, и «видит ли панель ноду» для
-    следилки за нодами. Returns {} when Remnawave is not configured or errors —
-    an unavailable panel must not blank out the whole agents view.
+    следилки за нодами. None — панель не настроена или не ответила: следилке
+    важно отличать «панель ноду не видит» от «панель молчит».
     """
     if not _configured():
-        return {}
+        return None
     try:
         nodes = rw_nodes()
     except RemnawaveApiError:
-        return {}
+        return None
     out: dict[str, dict] = {}
     for n in nodes:
         addr = (n.get("address") or "").strip()
