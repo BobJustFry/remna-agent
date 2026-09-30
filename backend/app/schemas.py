@@ -738,3 +738,67 @@ class AiHostHistoryOut(BaseModel):
     host_key: str
     days: int
     points: list[AiHistoryPointOut] = Field(default_factory=list)
+
+
+# ── следилка за нодами ───────────────────────────────────────────────────────
+
+class NodeWatchConfigOut(BaseModel):
+    enabled: bool = True
+    threshold_min: int = 10
+    remind_hours: int = 6
+    notify: bool = True
+    chat_id: str = ""
+    exclude: list[str] = Field(default_factory=list)
+    skip_panel_disabled: bool = True
+    utc_offset: int = 5
+    bot_ready: bool = False
+
+
+class NodeWatchConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    threshold_min: int | None = Field(default=None, ge=1, le=1440)
+    remind_hours: int | None = Field(default=None, ge=0, le=168)   # 0 — не напоминать
+    notify: bool | None = None
+    chat_id: str | None = Field(default=None, max_length=64)
+    exclude: list[uuid.UUID] | None = Field(default=None, max_length=1000)
+    skip_panel_disabled: bool | None = None
+    utc_offset: int | None = Field(default=None, ge=-12, le=14)
+
+
+class NodeDownOut(BaseModel):
+    node_id: str
+    name: str
+    host: str | None = None
+    hosting: str | None = None
+    since: datetime
+    # false — молчит, но порог ещё не вышел: тревоги пока нет.
+    alerted: bool = True
+    signals: dict = Field(default_factory=dict)
+
+
+class FleetBlindOut(BaseModel):
+    since: datetime
+    alerted: bool = False
+    down: int = 0
+    total: int = 0
+
+
+class NodeWatchStatusOut(BaseModel):
+    config: NodeWatchConfigOut
+    down: list[NodeDownOut] = Field(default_factory=list)
+    fleet: FleetBlindOut | None = None
+
+
+class NodeOutageOut(BaseModel):
+    id: uuid.UUID
+    kind: str                       # node | fleet
+    node_id: uuid.UUID | None = None
+    name: str
+    host: str | None = None
+    hosting: str | None = None
+    started_at: datetime
+    alerted_at: datetime
+    ended_at: datetime | None = None
+    resolution: str | None = None   # recovered | muted | removed | stopped
+    notified: bool = False
+    signals: dict = Field(default_factory=dict)

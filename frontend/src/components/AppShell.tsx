@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import {
   api,
@@ -7,6 +7,8 @@ import {
   type RemnawaveVersions,
   type SubwatchStatus,
 } from "../api/client";
+import { useNodeWatch } from "../hooks/useNodeWatch";
+import { downMap, type NodeDownMap } from "../lib/nodeWatch";
 import { useNodesAgents } from "../hooks/useNodesAgents";
 import { useNodesOnline } from "../hooks/useNodesOnline";
 import { useRemnawaveVersions } from "../hooks/useRemnawaveVersions";
@@ -53,6 +55,9 @@ export type AppOutletContext = {
   refreshRemnawaveVersions: (force?: boolean) => Promise<RemnawaveVersions | void>;
   subwatch: SubwatchStatus | null;
   refreshSubwatch: () => Promise<SubwatchStatus | null>;
+  /** Ноды, от которых рагент не получает данных, по id: с какого времени и что молчит. */
+  nodesDown: NodeDownMap;
+  refreshNodeWatch: () => Promise<unknown>;
 };
 
 const PAGE_TITLES: Record<string, string> = {
@@ -95,6 +100,8 @@ export function AppShell({ username, onLogout }: Props) {
     refresh: refreshRemnawaveVersions,
   } = useRemnawaveVersions(true);
   const { status: subwatchStatus, refresh: refreshSubwatch } = useSubwatch(true);
+  const { status: nodeWatchStatus, refresh: refreshNodeWatch } = useNodeWatch(true);
+  const nodesDown = useMemo(() => downMap(nodeWatchStatus?.down), [nodeWatchStatus]);
   const scriptQueue = useScriptQueue({
     onIdle: () => {
       void refreshAgents();
@@ -192,6 +199,8 @@ export function AppShell({ username, onLogout }: Props) {
     refreshRemnawaveVersions,
     subwatch: subwatchStatus,
     refreshSubwatch,
+    nodesDown,
+    refreshNodeWatch,
   };
 
   const viewJob = viewScriptJobKey ? scriptQueue.jobs[viewScriptJobKey] : undefined;

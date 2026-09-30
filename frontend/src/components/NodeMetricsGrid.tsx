@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { api } from "../api/client";
+import { api, type NodeDown } from "../api/client";
 import type {
   AgentMap,
   MetricPoint,
@@ -14,6 +14,7 @@ import { CountryFlag } from "./CountryFlag";
 import { NodeMetricLineChart } from "./NodeMetricCharts";
 import { NodeMetricSpark } from "./NodeMetricSpark";
 import { inboundPeerCount, inboundPeerFromXray } from "../lib/inboundPeerCount";
+import type { NodeDownMap } from "../lib/nodeWatch";
 import { pingToneClass } from "../lib/pingTone";
 import { capacityLabel, capacityTitle, capacityToneClass } from "../lib/capacityTone";
 import { bandwidthTitle, bandwidthToneClass, formatUpDown } from "../lib/bandwidth";
@@ -27,6 +28,7 @@ import {
   ruPingLabel,
   sumValues,
 } from "../lib/healthTone";
+import { DownSince } from "./DownSince";
 import { OnlineBadge } from "./OnlineBadge";
 import { SharedBadge } from "./SharedBadge";
 import { useSharingStatus } from "../hooks/useSharingStatus";
@@ -109,6 +111,7 @@ type Props = {
   statuses: OnlineMap;
   agentStatuses: AgentMap;
   xrayOnline: XrayOnlineMap;
+  nodesDown: NodeDownMap;
 };
 
 /** Icon-only period switcher: the tiles are dense, labels would crowd them out. */
@@ -119,7 +122,7 @@ const RANGE_BUTTONS: { id: MetricsRange; title: string; icon: ReactNode }[] = [
   { id: "all", title: "Всё время", icon: <RangeAllIcon /> },
 ];
 
-export function NodeMetricsGrid({ nodes, statuses, agentStatuses, xrayOnline }: Props) {
+export function NodeMetricsGrid({ nodes, statuses, agentStatuses, xrayOnline, nodesDown }: Props) {
   const [series, setSeries] = useState<Record<string, MetricPoint[]>>({});
   const [fromTs, setFromTs] = useState(() => Date.now() / 1000 - 86400);
   const [toTs, setToTs] = useState(() => Date.now() / 1000);
@@ -158,6 +161,7 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses, xrayOnline }: 
           fromTs={fromTs}
           toTs={toTs}
           status={statuses[node.id]}
+          down={nodesDown[node.id]}
           agent={agentStatuses[node.id]}
           xrayOnline={agentStatuses[node.id]?.xray_online ?? xrayOnline[node.id] ?? null}
           inboundIps={inboundPeerCount(agentStatuses[node.id], sharing, node.id)}
@@ -231,6 +235,7 @@ function NodeTile({
   fromTs,
   toTs,
   status,
+  down,
   agent,
   xrayOnline,
   inboundIps,
@@ -243,6 +248,7 @@ function NodeTile({
   fromTs: number;
   toTs: number;
   status: OnlineMap[string] | undefined;
+  down: NodeDown | undefined;
   agent: AgentMap[string] | undefined;
   xrayOnline: number | null;
   inboundIps: number | null;
@@ -288,6 +294,7 @@ function NodeTile({
           {node.name}
         </div>
         <SharedBadge nodeId={node.id} hits={sharingHits} compact />
+        <DownSince down={down} compact />
         <OnlineBadge status={status} compact />
       </div>
       <button

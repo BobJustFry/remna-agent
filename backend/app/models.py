@@ -176,6 +176,46 @@ class SubCheck(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class NodeOutage(Base):
+    """Журнал простоев: нода (или разом большинство нод) молчала дольше порога.
+
+    Открытая строка (ended_at пуст) — тревога, которая ещё не снята. По ней
+    рагент после перезапуска помнит, о чём уже сообщил, и не поднимает шум по
+    второму разу. Имя, адрес и хостер пишутся как были на момент тревоги:
+    журнал переживает и переименование ноды, и её удаление.
+    """
+
+    __tablename__ = "node_outages"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # node — одна нода; fleet — рагент разом перестал видеть большинство нод.
+    kind: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="node", server_default="node"
+    )
+    node_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    node_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    host: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    hosting: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # С какого опроса молчит — и когда молчание перевалило за порог.
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    alerted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # recovered — снова ответила; muted — исключили или выключили в панели;
+    # removed — ноду удалили; stopped — следилку выключили.
+    resolution: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Когда сообщение о падении реально ушло. Пусто — не доставлено (или
+    # уведомления выключены): попробуем ещё раз.
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Что именно молчало на момент тревоги: {"agent", "ssh", "panel"}; у fleet —
+    # {"down", "total", "by_hosting"}.
+    signals: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
 class AiRun(Base):
     """Один прогон проверки доступа к ИИ: по всем хостам подписки или по выборке.
 

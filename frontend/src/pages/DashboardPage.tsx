@@ -3,6 +3,7 @@ import { Link, useOutletContext } from "react-router-dom";
 import { api, type HaproxyLiveStats } from "../api/client";
 import type { AppOutletContext } from "../components/AppShell";
 import { CountryFlag } from "../components/CountryFlag";
+import { DownSince } from "../components/DownSince";
 import { HostingLogo } from "../components/HostingLogo";
 import { formatBytes, HaproxyStatsView } from "../components/HaproxyStatsView";
 import { NodeMetricsGrid } from "../components/NodeMetricsGrid";
@@ -10,6 +11,7 @@ import { OnlineBadge } from "../components/OnlineBadge";
 import { SubStatusCard } from "../components/SubStatusCard";
 import { agentNeedsUpdate, remnanodeNeedsUpdate } from "../hooks/useRemnawaveVersions";
 import { countryName } from "../lib/countries";
+import type { NodeDownMap } from "../lib/nodeWatch";
 import type { AgentStatus, NodeItem, OnlineStatus } from "../types";
 
 type DashTab = "tiles" | "overview" | "issues" | "load" | "geo" | "versions" | "haproxy";
@@ -71,6 +73,7 @@ export function DashboardPage() {
     remnawaveVersions,
     subwatch,
     refreshSubwatch,
+    nodesDown,
   } = useOutletContext<AppOutletContext>();
 
   const [tab, setTab] = useState<DashTab>(() => readTab());
@@ -240,6 +243,7 @@ export function DashboardPage() {
             statuses={statuses}
             agentStatuses={agentStatuses}
             xrayOnline={xrayOnline}
+            nodesDown={nodesDown}
           />
         )}
 
@@ -280,7 +284,7 @@ export function DashboardPage() {
                   </button>
                 }
               >
-                <IssuesList issues={stats.issues.slice(0, 8)} statuses={statuses} empty="Все ноды online, агенты отвечают." />
+                <IssuesList issues={stats.issues.slice(0, 8)} statuses={statuses} nodesDown={nodesDown} empty="Все ноды online, агенты отвечают." />
               </Panel>
 
               <Panel
@@ -323,7 +327,7 @@ export function DashboardPage() {
               </Link>
             }
           >
-            <IssuesList issues={stats.issues} statuses={statuses} empty="Критических проблем нет." />
+            <IssuesList issues={stats.issues} statuses={statuses} nodesDown={nodesDown} empty="Критических проблем нет." />
           </Panel>
         )}
 
@@ -596,10 +600,12 @@ function HaproxyDash({
 function IssuesList({
   issues,
   statuses,
+  nodesDown,
   empty,
 }: {
   issues: Issue[];
   statuses: Record<string, OnlineStatus>;
+  nodesDown: NodeDownMap;
   empty: string;
 }) {
   if (issues.length === 0) return <Empty text={empty} />;
@@ -616,6 +622,7 @@ function IssuesList({
                 {issue.node.name}
               </Link>
               <IssueBadge kind={issue.kind} label={issue.label} />
+              <DownSince down={nodesDown[issue.node.id]} />
             </div>
             <div className="mt-0.5 truncate font-mono text-[11px] text-[var(--muted)]">
               {issue.node.host}

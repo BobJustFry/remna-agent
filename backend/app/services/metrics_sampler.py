@@ -7,10 +7,12 @@ import logging
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.db import SessionLocal
 from app.models import Node
-from app.services.agent_metrics import fetch_agent_status
+from app.services import node_watch
+from app.services.agent_metrics import answered_now, fetch_agent_status, is_token_mismatch
 from app.services.counter_delta import CounterSnapshot, CounterTracker
 from app.services.crypto import decrypt_secret
 from app.services.metrics_store import SAMPLE_INTERVAL_SEC, insert_samples, prune_old
@@ -35,9 +37,25 @@ def _snapshot(ag: object | None) -> CounterSnapshot | None:
     )
 
 
+def _answered(node: Node, ag: object | None) -> tuple[bool | None, str | None]:
+    """Ответил ли агент на этот опрос — для следилки за нодами.
+
+    В rows ниже идёт сглаженный ответ (первые осечки прикрыты прошлым удачным),
+    а тут нужен честный: по нему считается, сколько нода молчит.
+    """
+    if not node.agent_token_enc:
+        return None, None
+    if ag is None:
+        return False, None
+    if is_token_mismatch(ag):  # type: ignore[arg-type]
+        return False, "token"
+    return answered_now(str(node.id)), None
+
+
 async def sample_once() -> int:
     async with SessionLocal() as db:
-        result = await db.execute(select(Node))
+        # Хостер нужен следилке за нодами: он идёт в текст тревоги.
+        result = await db.execute(select(Node).options(selectinload(Node.hosting)))
         nodes = list(result.scalars().all())
         if not nodes:
             return 0
@@ -55,15 +73,16 @@ async def sample_once() -> int:
         # Онлайн ядра Xray приходит от панели Remnawave — один запрос на весь тик,
         # а не по ноде. Панель может быть недоступна: тогда пишем None, а не ноль,
         # иначе на графике появится провал, которого не было.
-        from app.services.remnawave_api import rw_users_online_by_address
+        from app.services.remnawave_api import rw_fleet_by_address, users_online
 
-        online_task = asyncio.to_thread(rw_users_online_by_address)
+        online_task = asyncio.to_thread(rw_fleet_by_address)
         agent_pairs = await asyncio.gather(*(one_agent(n) for n in nodes), return_exceptions=True)
         try:
-            by_address = await online_task
+            panel = await online_task
         except Exception:
             log.warning("xray online unavailable this tick")
-            by_address = {}
+            panel = {}
+        by_address = users_online(panel)
         agents: dict[str, object] = {}
         for item in agent_pairs:
             if isinstance(item, BaseException):
@@ -107,7 +126,17 @@ async def sample_once() -> int:
                     "ru_loss_pct": ru_loss if present else None,
                 }
             )
-        return await insert_samples(db, rows)
+        written = await insert_samples(db, rows)
+
+        # Те же ответы агентов — следилке за нодами. Её сбой не должен стоить
+        # графикам отсчёта, поэтому после записи и в своём try.
+        try:
+            await node_watch.observe(
+                db, nodes, {str(n.id): _answered(n, agents.get(str(n.id))) for n in nodes}, panel)
+        except Exception:
+            log.exception("node watch failed")
+            await db.rollback()
+        return written
 
 
 async def run_metrics_sampler() -> None:

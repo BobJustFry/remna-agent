@@ -31,6 +31,12 @@ async def _tcp_check(host: str, port: int, timeout: float = 1.5) -> PingResult:
         return PingResult(online=False, latency_ms=None, method="tcp")
 
 
+async def check_tcp(host: str, port: int, timeout: float = 3.0) -> bool:
+    """Открывается ли TCP-порт. ICMP тут не годится: на него может ответить кто
+    угодно по дороге, а принятое соединение означает, что сервер жив."""
+    return (await _tcp_check(host, port, timeout=timeout)).online
+
+
 async def _icmp_check(host: str, timeout: float = 1.5) -> PingResult | None:
     for privileged in (True, False):
         try:

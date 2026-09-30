@@ -1,10 +1,11 @@
 import { memo, useState } from "react";
-import { api, type RemnaScriptAction } from "../api/client";
+import { api, type NodeDown, type RemnaScriptAction } from "../api/client";
 import type { InstallJob } from "../hooks/useAgentInstallQueue";
 import { agentNeedsUpdate, remnanodeNeedsUpdate, warpNeedsInstall } from "../hooks/useRemnawaveVersions";
 import type { AgentStatus, NodeItem, OnlineStatus, SharingUserHit, SshCheckResult } from "../types";
 import { CopyButton } from "./CopyButton";
 import { CountryFlag } from "./CountryFlag";
+import { DownSince } from "./DownSince";
 import { HostingLogo } from "./HostingLogo";
 import { OnlineBadge } from "./OnlineBadge";
 import { SharedBadge } from "./SharedBadge";
@@ -14,6 +15,8 @@ export type NodeListDensity = "comfortable" | "compact";
 type Props = {
   node: NodeItem;
   status?: OnlineStatus;
+  /** Рагент не получает от ноды данных: с какого времени и что молчит. */
+  down?: NodeDown;
   agent?: AgentStatus;
   sharingHits?: SharingUserHit[];
   inboundIps?: number | null;
@@ -46,6 +49,7 @@ type Props = {
 export const NodeRow = memo(function NodeRow({
   node,
   status,
+  down,
   agent,
   sharingHits,
   inboundIps,
@@ -447,11 +451,16 @@ export const NodeRow = memo(function NodeRow({
             <div className={`truncate text-[var(--text)] ${compact ? "text-xs font-medium" : "font-medium"}`}>
               {node.name}
             </div>
+            {/* В плотном списке второй строки нет — пометка встаёт рядом с именем, короткая. */}
+            {compact && <DownSince down={down} compact />}
             <SharedBadge nodeId={node.id} hits={sharingHits ?? []} compact={compact} />
           </div>
           {!compact && (
-            <div className="mt-0.5 truncate text-xs text-[var(--muted)]">
-              {node.ssh_user}@{node.host}:{node.ssh_port}
+            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-[var(--muted)]">
+              <DownSince down={down} />
+              <span className="truncate">
+                {node.ssh_user}@{node.host}:{node.ssh_port}
+              </span>
             </div>
           )}
         </div>
@@ -509,6 +518,7 @@ export const NodeRow = memo(function NodeRow({
           {node.country_code && <CountryFlag code={node.country_code} size={12} />}
           <div className="min-w-0 flex-1">
             <div className="truncate text-xs font-medium text-[var(--text)]">{node.name}</div>
+            <DownSince down={down} compact />
             <SharedBadge nodeId={node.id} hits={sharingHits ?? []} compact />
             <div className="truncate font-mono text-[10px] text-[var(--muted)]">{node.host}</div>
           </div>
@@ -530,6 +540,7 @@ export const NodeRow = memo(function NodeRow({
                   <OnlineBadge status={status} />
                   {node.country_code && <CountryFlag code={node.country_code} size={14} />}
                   <div className="truncate font-medium text-[var(--text)]">{node.name}</div>
+                  <DownSince down={down} />
                   <SharedBadge nodeId={node.id} hits={sharingHits ?? []} />
                 </div>
                 <div className="mt-1 truncate text-xs text-[var(--muted)]">

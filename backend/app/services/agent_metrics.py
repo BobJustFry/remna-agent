@@ -114,6 +114,17 @@ def peek_cached_status(node_id: str) -> AgentStatus | None:
     return entry.last_ok
 
 
+def answered_now(node_id: str) -> bool:
+    """Ответил ли агент на последний опрос — без сглаживания.
+
+    fetch_agent_status первые осечки прикрывает прошлым удачным ответом, чтобы
+    интерфейс не моргал. Следилке за нодами нужна правда: по ней считается,
+    сколько нода уже молчит.
+    """
+    entry = _cache.get(f"node:{node_id}")
+    return entry is not None and entry.last_ok is not None and entry.consecutive_fails == 0
+
+
 def clear_agent_status_cache(node_id: str | None = None) -> None:
     if node_id is None:
         _cache.clear()

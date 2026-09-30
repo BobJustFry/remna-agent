@@ -194,6 +194,17 @@ export const api = {
       `/api/ai-access/history?key=${encodeURIComponent(key)}&days=${days}`,
     ),
 
+  nodeWatchStatus: () => request<NodeWatchStatus>("/api/node-watch/status"),
+  nodeWatchEvents: (days = 30) =>
+    request<NodeOutage[]>(`/api/node-watch/events?days=${days}`),
+  nodeWatchUpdate: (payload: NodeWatchUpdate) =>
+    request<NodeWatchStatus>("/api/node-watch/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  nodeWatchTelegramTest: () =>
+    request<{ sent: boolean }>("/api/node-watch/telegram/test", { method: "POST" }),
+
   panelBackupStatus: () => request<PanelBackupStatus>("/api/panel-backup/status"),
   panelBackupRun: () => request<PanelBackupStatus>("/api/panel-backup/run", { method: "POST" }),
   panelBackupUpdate: (payload: PanelBackupUpdate) =>
@@ -842,6 +853,66 @@ export type PanelBackupStatus = {
 export type PanelBackupUpdate = Partial<
   Omit<PanelBackupConfig, "ssh_key_set"> & { ssh_key: string }
 >;
+
+export type NodeWatchConfig = {
+  enabled: boolean;
+  /** Сколько минут нода должна молчать подряд, чтобы это стало тревогой. */
+  threshold_min: number;
+  /** Напоминать о лежащей раз в столько часов; 0 — не напоминать. */
+  remind_hours: number;
+  notify: boolean;
+  /** Пусто — тот же чат, что у следилки за подпиской. */
+  chat_id: string;
+  /** id нод, по которым не тревожим. */
+  exclude: string[];
+  skip_panel_disabled: boolean;
+  /** Часовой пояс времени в сообщениях, часы от UTC. */
+  utc_offset: number;
+  bot_ready: boolean;
+};
+
+/** Что именно молчит: null — такого сигнала нет (агент не стоит, панель не ответила). */
+export type NodeSignals = {
+  agent?: boolean | null;
+  agent_error?: string;
+  ssh?: boolean | null;
+  panel?: boolean | null;
+};
+
+export type NodeDown = {
+  node_id: string;
+  name: string;
+  host: string | null;
+  hosting: string | null;
+  since: string;
+  /** false — молчит, но порог ещё не вышел: тревоги пока нет. */
+  alerted: boolean;
+  signals: NodeSignals;
+};
+
+export type NodeWatchStatus = {
+  config: NodeWatchConfig;
+  down: NodeDown[];
+  /** Рагент разом перестал видеть большинство нод. */
+  fleet: { since: string; alerted: boolean; down: number; total: number } | null;
+};
+
+export type NodeWatchUpdate = Partial<Omit<NodeWatchConfig, "bot_ready">>;
+
+export type NodeOutage = {
+  id: string;
+  kind: "node" | "fleet";
+  node_id: string | null;
+  name: string;
+  host: string | null;
+  hosting: string | null;
+  started_at: string;
+  alerted_at: string;
+  ended_at: string | null;
+  resolution: "recovered" | "muted" | "removed" | "stopped" | null;
+  notified: boolean;
+  signals: NodeSignals & { down?: number; total?: number };
+};
 
 export type AiVerdict = "ok" | "blocked" | "challenge" | "timeout" | "error";
 

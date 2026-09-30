@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useOutletContext } from "react-router-dom";
 import { api, type ApiToken } from "../api/client";
+import { NodeWatchSettings } from "../components/NodeWatchSettings";
 import { SubwatchSettings } from "../components/SubwatchSettings";
 import type { AppOutletContext } from "../components/AppShell";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -8,7 +9,7 @@ import { CopyButton } from "../components/CopyButton";
 import { getQueueConcurrency, QUEUE_CONCURRENCY_BOUNDS, setQueueConcurrency } from "../lib/concurrency";
 
 export function SettingsPage() {
-  const { remnawaveVersions, remnawaveLoading, refreshRemnawaveVersions } =
+  const { nodes, remnawaveVersions, remnawaveLoading, refreshRemnawaveVersions, refreshNodeWatch } =
     useOutletContext<AppOutletContext>();
   const [secretKey, setSecretKey] = useState("");
   const [concurrency, setConcurrency] = useState(getQueueConcurrency);
@@ -138,6 +139,8 @@ export function SettingsPage() {
             </section>
 
             <SubwatchSettings />
+
+            <NodeWatchSettings nodes={nodes} onChanged={() => void refreshNodeWatch()} />
 
             <section className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] p-4">
               <h2 className="text-sm font-semibold">API-токены</h2>

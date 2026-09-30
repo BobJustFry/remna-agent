@@ -76,12 +76,12 @@ def rw_nodes() -> list[dict]:
     return out if isinstance(out, list) else []
 
 
-def rw_users_online_by_address() -> dict[str, int]:
-    """Users the Xray core reports online, keyed by node address.
+def rw_fleet_by_address() -> dict[str, dict]:
+    """Что панель знает о каждой ноде, по адресу ноды.
 
-    The nodes run no gRPC stats API of their own, so this is the only place the
-    core's own count is available: RemnaNode reports it to the panel, and the
-    panel hands it to us. Returns {} when Remnawave is not configured or errors —
+    {адрес: {"users": онлайн ядра | None, "connected": bool | None, "disabled": bool}}.
+    Один запрос на всё: и онлайн для графиков, и «видит ли панель ноду» для
+    следилки за нодами. Returns {} when Remnawave is not configured or errors —
     an unavailable panel must not blank out the whole agents view.
     """
     if not _configured():
@@ -90,16 +90,22 @@ def rw_users_online_by_address() -> dict[str, int]:
         nodes = rw_nodes()
     except RemnawaveApiError:
         return {}
-    out: dict[str, int] = {}
+    out: dict[str, dict] = {}
     for n in nodes:
         addr = (n.get("address") or "").strip()
         if not addr:
             continue
         try:
-            users = int(n.get("usersOnline") or 0)
+            users: int | None = int(n.get("usersOnline") or 0)
         except (TypeError, ValueError):
-            continue
-        out[addr] = users
+            users = None
+        connected = n.get("isConnected")
+        info = {
+            "users": users,
+            "connected": connected if isinstance(connected, bool) else None,
+            "disabled": n.get("isDisabled") is True,
+        }
+        out[addr] = info
         # Ноды за CDN панель адресует origin-доменом, а у нас та же машина
         # записана по IP (рагент ходит к ней по SSH, и завязывать его на
         # CDN-домен нельзя). Без второго ключа такая нода выглядит в карточке
@@ -107,8 +113,23 @@ def rw_users_online_by_address() -> dict[str, int]:
         if not _IPV4.match(addr):
             ip = _resolve(addr)
             if ip:
-                out.setdefault(ip, users)
+                out.setdefault(ip, info)
     return out
+
+
+def users_online(fleet: dict[str, dict]) -> dict[str, int]:
+    """Онлайн ядра Xray по адресам — из ответа rw_fleet_by_address."""
+    return {addr: info["users"] for addr, info in fleet.items() if info.get("users") is not None}
+
+
+def rw_users_online_by_address() -> dict[str, int]:
+    """Users the Xray core reports online, keyed by node address.
+
+    The nodes run no gRPC stats API of their own, so this is the only place the
+    core's own count is available: RemnaNode reports it to the panel, and the
+    panel hands it to us. Returns {} when Remnawave is not configured or errors.
+    """
+    return users_online(rw_fleet_by_address())
 
 
 def rw_node_by_name(name: str) -> dict:

@@ -61,6 +61,7 @@ export function NodesPage() {
     remnawaveVersions,
     latestAgentVersion,
     latestWgcfVersion,
+    nodesDown,
   } = useOutletContext<AppOutletContext>();
   const sharing = useSharingStatus();
   const [error, setError] = useState<string | null>(null);
@@ -713,6 +714,7 @@ export function NodesPage() {
               key={node.id}
               node={node}
               status={statuses[node.id]}
+              down={nodesDown[node.id]}
               agent={agentStatuses[node.id]}
               sharingHits={sharing?.by_agent_id[node.id] ?? []}
               inboundIps={inboundPeerCount(agentStatuses[node.id], sharing, node.id)}

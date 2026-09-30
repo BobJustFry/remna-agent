@@ -12,6 +12,7 @@ from app.api import (
     audit,
     auth,
     hostings,
+    node_watch as node_watch_api,
     nodes,
     panel_backup as panel_backup_api,
     remnawave,
@@ -84,6 +85,7 @@ app.include_router(audit.router, prefix="/api")
 app.include_router(subwatch_api.router, prefix="/api")
 app.include_router(panel_backup_api.router, prefix="/api")
 app.include_router(ai_access_api.router, prefix="/api")
+app.include_router(node_watch_api.router, prefix="/api")
 
 
 @app.get("/api/health")
