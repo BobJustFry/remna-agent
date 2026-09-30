@@ -9,6 +9,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
     func,
@@ -172,4 +173,58 @@ class SubCheck(Base):
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     hosts: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cert_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AiRun(Base):
+    """Один прогон проверки доступа к ИИ по всем хостам подписки.
+
+    Прогон длится минуты, поэтому заводится сразу со статусом running и
+    дописывается по мере хода: интерфейс показывает прогресс по hosts_done.
+    """
+
+    __tablename__ = "ai_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)   # running | done | failed | aborted
+    trigger: Mapped[str] = mapped_column(String(16), nullable=False)  # schedule | manual
+    hosts_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    hosts_done: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Отличия от прошлого удачного прогона — считаются один раз, в конце.
+    changes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+
+class AiCheck(Base):
+    """Результат одного хоста в прогоне: вердикт по каждому сервису и выходы.
+
+    host — имя хоста как в подписке, host_key — оно же без служебных значков:
+    по нему склеивается история, когда хост переименовывают.
+    """
+
+    __tablename__ = "ai_checks"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ai_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    host: Mapped[str] = mapped_column(String(255), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)   # место в подписке
+    host_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    tunnel: Mapped[str] = mapped_column(String(16), nullable=False)   # up | down | error
+    exit_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    exit_country: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    ai_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ai_country: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    ai_warp: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # {сервис: {"v": вердикт, "note": признак, "tries": попыток}}
+    results: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

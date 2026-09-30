@@ -171,6 +171,18 @@ export const api = {
   subwatchTelegramTest: () =>
     request<{ sent: boolean }>("/api/subwatch/telegram/test", { method: "POST" }),
 
+  aiAccessStatus: () => request<AiAccessStatus>("/api/ai-access/status"),
+  aiAccessRun: () => request<AiAccessStatus>("/api/ai-access/run", { method: "POST" }),
+  aiAccessUpdate: (payload: AiAccessUpdate) =>
+    request<AiAccessStatus>("/api/ai-access/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  aiAccessHistory: (key: string, days = 30) =>
+    request<AiHostHistory>(
+      `/api/ai-access/history?key=${encodeURIComponent(key)}&days=${days}`,
+    ),
+
   panelBackupStatus: () => request<PanelBackupStatus>("/api/panel-backup/status"),
   panelBackupRun: () => request<PanelBackupStatus>("/api/panel-backup/run", { method: "POST" }),
   panelBackupUpdate: (payload: PanelBackupUpdate) =>
@@ -819,3 +831,102 @@ export type PanelBackupStatus = {
 export type PanelBackupUpdate = Partial<
   Omit<PanelBackupConfig, "ssh_key_set"> & { ssh_key: string }
 >;
+
+export type AiVerdict = "ok" | "blocked" | "challenge" | "timeout" | "error";
+
+export type AiAccessConfig = {
+  enabled: boolean;
+  interval_hours: number;
+  sub_url: string;
+  concurrency: number;
+  exclude: string;
+  notify: boolean;
+  chat_id: string;
+  keep_days: number;
+  gemini_key_set: boolean;
+  sub_from_subwatch: boolean;
+  sub_configured: boolean;
+  bot_ready: boolean;
+};
+
+export type AiCell = {
+  verdict: AiVerdict;
+  note: string;
+  tries: number;
+  prev: AiVerdict | null;
+};
+
+export type AiHostRow = {
+  host: string;
+  host_key: string;
+  checked_at: string;
+  tunnel: "up" | "down" | "error";
+  exit_ip: string | null;
+  exit_country: string | null;
+  ai_ip: string | null;
+  ai_country: string | null;
+  ai_warp: string | null;
+  prev_ai_country: string | null;
+  duration_ms: number;
+  error: string | null;
+  results: Record<string, AiCell>;
+  changed: boolean;
+  is_new: boolean;
+};
+
+export type AiChange = {
+  host: string;
+  host_key: string;
+  service: string;
+  before: string;
+  after: string;
+};
+
+export type AiRun = {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+  status: "running" | "done" | "failed" | "aborted";
+  trigger: "schedule" | "manual";
+  hosts_total: number | null;
+  hosts_done: number;
+  error: string | null;
+  changes: AiChange[];
+};
+
+export type AiAccessStatus = {
+  config: AiAccessConfig;
+  services: { key: string; name: string }[];
+  running: AiRun | null;
+  last: AiRun | null;
+  shown: AiRun | null;
+  prev: AiRun | null;
+  rows: AiHostRow[];
+  next_run_at: string | null;
+};
+
+export type AiAccessUpdate = Partial<
+  Omit<AiAccessConfig, "gemini_key_set" | "sub_from_subwatch" | "sub_configured" | "bot_ready"> & {
+    gemini_api_key: string;
+  }
+>;
+
+export type AiHistoryPoint = {
+  run_id: string;
+  checked_at: string;
+  host: string;
+  tunnel: string;
+  exit_ip: string | null;
+  exit_country: string | null;
+  ai_ip: string | null;
+  ai_country: string | null;
+  ai_warp: string | null;
+  error: string | null;
+  results: Record<string, AiCell>;
+};
+
+export type AiHostHistory = {
+  host_key: string;
+  days: number;
+  points: AiHistoryPoint[];
+};

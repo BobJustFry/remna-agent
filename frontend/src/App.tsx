@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { api } from "./api/client";
 import { AppShell } from "./components/AppShell";
+import { AiAccessPage } from "./pages/AiAccessPage";
 import { AutomationPage } from "./pages/AutomationPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { HostingsPage } from "./pages/HostingsPage";
@@ -67,6 +68,7 @@ export default function App() {
           <Route path="automation" element={<AutomationPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="hostings" element={<HostingsPage />} />
+          <Route path="ai-access" element={<AiAccessPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

@@ -8,6 +8,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api import (
+    ai_access as ai_access_api,
     audit,
     auth,
     hostings,
@@ -19,6 +20,7 @@ from app.api import (
     subwatch as subwatch_api,
 )
 from app.config import assert_secure_settings, settings
+from app.services import ai_access
 from app.services.metrics_sampler import run_metrics_sampler
 from app.services.sharing_scanner import run_sharing_scanner
 from app.services.panel_backup import run_panel_backup
@@ -35,10 +37,12 @@ async def lifespan(_app: FastAPI):
     # Спит, пока следилка выключена в настройках: сама себя не включает.
     subwatch_task = asyncio.create_task(run_subwatch(), name="subwatch")
     backup_task = asyncio.create_task(run_panel_backup(), name="panel-backup")
+    ai_task = asyncio.create_task(ai_access.run_ai_access(), name="ai-access")
     try:
         yield
     finally:
-        for task in (metrics, sharing_task, subwatch_task, backup_task):
+        await ai_access.shutdown()
+        for task in (metrics, sharing_task, subwatch_task, backup_task, ai_task):
             task.cancel()
             try:
                 await task
@@ -79,6 +83,7 @@ app.include_router(sharing.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 app.include_router(subwatch_api.router, prefix="/api")
 app.include_router(panel_backup_api.router, prefix="/api")
+app.include_router(ai_access_api.router, prefix="/api")
 
 
 @app.get("/api/health")

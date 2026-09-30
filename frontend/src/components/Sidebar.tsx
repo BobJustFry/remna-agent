@@ -56,6 +56,9 @@ export function Sidebar({ username, onLogout, open, onClose }: Props) {
             <NavItem to="/hostings" onNavigate={onClose}>
               Хостинги
             </NavItem>
+            <NavItem to="/ai-access" onNavigate={onClose}>
+              ИИ-доступ
+            </NavItem>
           </NavSection>
 
           <NavSection title="Управление">

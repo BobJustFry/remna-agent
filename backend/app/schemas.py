@@ -611,3 +611,107 @@ class PanelBackupStatusOut(BaseModel):
     files: list[BackupFileOut] = Field(default_factory=list)
     total_bytes: int = 0
     disk_free_bytes: int | None = None
+
+
+# ── доступ к ИИ через хосты ──────────────────────────────────────────────────
+
+class AiAccessConfigOut(BaseModel):
+    enabled: bool = True
+    interval_hours: int = 12
+    sub_url: str = ""
+    concurrency: int = 2
+    exclude: str = ""
+    notify: bool = True
+    chat_id: str = ""
+    keep_days: int = 45
+    gemini_key_set: bool = False
+    # Свой адрес не задан — подписку берём у следилки. Сам адрес не отдаём
+    # второй раз: в нём короткий uuid пользователя.
+    sub_from_subwatch: bool = False
+    sub_configured: bool = False
+    bot_ready: bool = False
+
+
+class AiAccessConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    interval_hours: int | None = Field(default=None, ge=1, le=168)
+    sub_url: str | None = Field(default=None, max_length=512)
+    concurrency: int | None = Field(default=None, ge=1, le=4)
+    exclude: str | None = Field(default=None, max_length=1000)
+    notify: bool | None = None
+    chat_id: str | None = Field(default=None, max_length=64)
+    keep_days: int | None = Field(default=None, ge=30, le=365)
+    gemini_api_key: str | None = Field(default=None, max_length=256)   # пустая строка стирает
+
+
+class AiServiceOut(BaseModel):
+    key: str
+    name: str
+
+
+class AiCellOut(BaseModel):
+    verdict: str
+    note: str = ""
+    tries: int = 0
+    prev: str | None = None       # вердикт прошлого прогона, если отличался
+
+
+class AiHostRowOut(BaseModel):
+    host: str
+    host_key: str
+    checked_at: datetime
+    tunnel: str
+    exit_ip: str | None = None
+    exit_country: str | None = None
+    ai_ip: str | None = None
+    ai_country: str | None = None
+    ai_warp: str | None = None
+    prev_ai_country: str | None = None
+    duration_ms: int = 0
+    error: str | None = None
+    results: dict[str, AiCellOut] = Field(default_factory=dict)
+    changed: bool = False
+    is_new: bool = False
+
+
+class AiRunOut(BaseModel):
+    id: uuid.UUID
+    started_at: datetime
+    finished_at: datetime | None = None
+    status: str
+    trigger: str
+    hosts_total: int | None = None
+    hosts_done: int = 0
+    error: str | None = None
+    changes: list[dict] = Field(default_factory=list)
+
+
+class AiAccessStatusOut(BaseModel):
+    config: AiAccessConfigOut
+    services: list[AiServiceOut]
+    running: AiRunOut | None = None
+    last: AiRunOut | None = None        # последний прогон любого исхода
+    shown: AiRunOut | None = None       # прогон, чья матрица показана (последний удачный)
+    prev: AiRunOut | None = None        # с чем сравниваем
+    rows: list[AiHostRowOut] = Field(default_factory=list)
+    next_run_at: datetime | None = None
+
+
+class AiHistoryPointOut(BaseModel):
+    run_id: uuid.UUID
+    checked_at: datetime
+    host: str
+    tunnel: str
+    exit_ip: str | None = None
+    exit_country: str | None = None
+    ai_ip: str | None = None
+    ai_country: str | None = None
+    ai_warp: str | None = None
+    error: str | None = None
+    results: dict[str, AiCellOut] = Field(default_factory=dict)
+
+
+class AiHostHistoryOut(BaseModel):
+    host_key: str
+    days: int
+    points: list[AiHistoryPointOut] = Field(default_factory=list)

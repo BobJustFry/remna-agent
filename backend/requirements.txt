@@ -12,3 +12,4 @@ httpx==0.28.1
 icmplib==3.0.4
 paramiko==3.5.1
 puttykeys==1.0.3
+curl_cffi==0.16.3
