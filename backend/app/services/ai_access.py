@@ -1,11 +1,17 @@
-"""Доступ к ИИ-сервисам через каждый хост подписки.
+"""Доступность приложений через каждый хост подписки: ИИ-сервисы и TikTok.
 
-Значок 🧠 в имени хоста — обещание клиенту, что через этот хост открываются
-нейросети. Держится оно на цепочке, где рвётся всё что угодно: у ноды пропал
-интерфейс WARP (запросы к ИИ виснут), пропало правило маршрутизации (ИИ идёт
-с адреса дата-центра и получает 403), Cloudflare сменил точку выхода WARP на
-страну из отказа. Снаружи ни одна из этих поломок не видна — клиент просто
-уходит с хоста. Поэтому проверяем сами, по расписанию.
+Значки 🧠 и 📱 в имени хоста — обещание клиенту, что через этот хост
+открываются нейросети и TikTok. Держится обещание про ИИ на цепочке, где
+рвётся всё что угодно: у ноды пропал интерфейс WARP (запросы к ИИ виснут),
+пропало правило маршрутизации (ИИ идёт с адреса дата-центра и получает 403),
+Cloudflare сменил точку выхода WARP на страну из отказа. TikTok же метит
+адреса выходов сам: помеченный адрес вместо сайта получает заслонку WAF.
+Снаружи ни одна из этих поломок не видна — клиент просто уходит с хоста.
+Поэтому проверяем сами, по расписанию.
+
+Внутренние имена (модуль, таблицы ai_runs/ai_checks, API /api/ai-access)
+остались от времён, когда проверялся только ИИ: их не переименовываем, чтобы
+не ломать скрипты и историю.
 
 Методика та же, что у разового замера 29–30.09:
 
@@ -84,8 +90,28 @@ SERVICES: list[tuple[str, str]] = [
     ("anthropic_api", "Anthropic API"),
     ("gemini_web", "Gemini"),
     ("gemini_api", "Gemini API"),     # только если в настройках есть ключ
+    ("tiktok_web", "TikTok"),
 ]
 SERVICE_NAMES = dict(SERVICES)
+
+# Группы в матрице: нейросети отдельно от прочих приложений. Новое приложение —
+# строка в SERVICES и его ключ сюда; всё, чего здесь нет, считается ИИ.
+GROUP_AI = "ai"
+GROUP_APPS = "apps"
+GROUP_NAMES = {GROUP_AI: "ИИ", GROUP_APPS: "Приложения"}
+SERVICE_GROUPS = {"tiktok_web": GROUP_APPS}
+
+
+def service_group(key: str) -> str:
+    return SERVICE_GROUPS.get(key, GROUP_AI)
+
+
+def service_list(with_gemini_api: bool) -> list[dict]:
+    """Колонки матрицы по порядку: сначала ИИ, потом приложения."""
+    out = [{"key": k, "name": n, "group": service_group(k), "group_name": GROUP_NAMES[service_group(k)]}
+           for k, n in SERVICES if k != "gemini_api" or with_gemini_api]
+    order = list(GROUP_NAMES)
+    return sorted(out, key=lambda s: order.index(s["group"]))
 
 URLS = {
     "trace_direct": "https://www.cloudflare.com/cdn-cgi/trace",
@@ -97,6 +123,9 @@ URLS = {
     "claude_web": "https://claude.ai/",
     "anthropic_api": "https://api.anthropic.com/v1/models",
     "gemini_web": "https://gemini.google.com/app",
+    # Страница входа, а не главная: владелец судит о доступе по ней — при блоке
+    # TikTok страницу входа не отдаёт. Только GET, ничего не заполняем.
+    "tiktok_web": "https://www.tiktok.com/login",
 }
 GEMINI_GEN_URL = ("https://gemini.google.com/_/BardChatUi/data/"
                   "assistant.lamda.BardFrontendService/StreamGenerate")
@@ -111,6 +140,8 @@ GOOGLE_COOKIES = {"SOCS": "CAESEwgDEgk0ODE3Nzk3MjQaAmVuIAEaBgiA_LyaBg", "CONSENT
 
 XRAY_BIN = os.environ.get("XRAY_BIN", "xray")
 REQ_TIMEOUT = 20.0
+# Страница TikTok весит сотни КБ — вялой ноде нужно больше времени, как в замере 10.09.
+TT_TIMEOUT = 30.0
 GEN_TIMEOUT = 45.0
 TRIES = 3
 RETRY_PAUSE = 3.0
@@ -277,12 +308,91 @@ def judge_gemini_api(r: Resp) -> Verdict:
     return _soft_error(r, body[:60].replace("\n", " "))
 
 
+# ── TikTok: страница входа ───────────────────────────────────────────────────
+#
+# Два признака из одного ответа на GET /login:
+#
+# * страница входа — по ней вердикт (так видит владелец в приложении и в
+#   браузере): при блоке TikTok страницу входа не отдаёт;
+# * размер — из замера 10.09: рабочий выход получает настоящую страницу в
+#   сотни КБ, помеченный адрес — заслонку WAF ~1,5 КБ («Please wait…»,
+#   slardar_us_waf). Заголовок `Server: TLB` ничего не значит: с ним приходит
+#   и рабочая страница.
+#
+# Разошлись признаки — вердикт по странице входа, расхождение пишем в note.
+
+TT_PAGE_MIN = 50_000     # настоящая страница — сотни КБ, заслонка — полторы
+TT_WAF_RE = re.compile(r"slardar_us_waf|_wafchallengeid", re.I)
+TT_WAIT_RE = re.compile(r"please wait\s*(?:\.\.\.|…)", re.I)
+# Данные, которыми TikTok оживляет страницу: есть только у настоящей страницы.
+TT_APP_RE = re.compile(r"__UNIVERSAL_DATA_FOR_REHYDRATION__|SIGI_STATE|webapp\.app-context")
+TT_LOGIN_TITLE_RE = re.compile(r"log\s?in|sign\s?in|войти|вход", re.I)
+TT_REGION_RE = re.compile(r'"region"\s*:\s*"([A-Z]{2})"')
+# Регионы, где TikTok работает в урезанном виде: для России с 2022 года лента
+# из старых и местных роликов, новое не грузится. Это не рабочий доступ.
+TT_REGION_LIMITED = {"RU": "TikTok для России урезан"}
+
+
+def _kb(size: int) -> str:
+    return f"{size / 1024:.1f} КБ".replace(".", ",") if size < 10240 else f"{round(size / 1024)} КБ"
+
+
+def tiktok_region(body: str) -> str | None:
+    """Страна, которую TikTok назначил адресу, — из данных страницы."""
+    at = body.find("app-context")
+    m = TT_REGION_RE.search(body, at) if at >= 0 else TT_REGION_RE.search(body)
+    return m.group(1) if m else None
+
+
+def judge_tiktok_web(r: Resp) -> Verdict:
+    size = len(r.text.encode("utf-8", errors="replace"))
+    split = urllib.parse.urlsplit(r.url)
+    host, path = split.hostname or "", split.path or "/"
+    on_tiktok = host == "tiktok.com" or host.endswith(".tiktok.com")
+    big = size >= TT_PAGE_MIN
+    # Заслонка — маленькая страница с меткой WAF или с одним «Please wait…»
+    # без данных приложения. В настоящей странице эти строки тоже встречаются.
+    app = bool(TT_APP_RE.search(r.text))
+    waf = not big and (bool(TT_WAF_RE.search(r.text)) or (not app and bool(TT_WAIT_RE.search(r.text))))
+    server = r.header("server")
+    tail = f", Server: {server}" if server else ""
+
+    # Признак 1 — страница входа: настоящая страница TikTok по адресу /login.
+    login = (r.code == 200 and on_tiktok and path.startswith("/login") and not waf
+             and (bool(TT_LOGIN_TITLE_RE.search(_title(r.text))) or app))
+    # Признак 2 — размер (big/waf выше): настоящая страница или заслонка.
+    if login:
+        region = tiktok_region(r.text)
+        note = f"200 {path}, {_kb(size)}" + (f", регион {region}" if region else "")
+        if region in TT_REGION_LIMITED:
+            return Verdict(BLOCKED, f"{note} — {TT_REGION_LIMITED[region]}")
+        if not big:
+            note += " · расхождение: страница входа есть, а размер мал"
+        return Verdict(OK, note)
+
+    if waf:
+        return Verdict(BLOCKED, f"{r.code} заслонка WAF, {_kb(size)}{tail}")
+    kw = _kw(r) if not big or r.code != 200 else None
+    if kw:
+        return Verdict(BLOCKED, f"{r.code} «{kw}»")
+    if r.code == 200 and on_tiktok and not path.startswith("/login"):
+        # Увёл со страницы входа — её не отдают.
+        note = f"200 → {path}, нет страницы входа, {_kb(size)}"
+        if big:
+            note += " · расхождение: по размеру страница настоящая"
+        return Verdict(BLOCKED, note)
+    if r.code in (403, 451):
+        return Verdict(BLOCKED, f"{r.code} {_kb(size)}{tail}")
+    return _soft_error(r, f"{_kb(size)} {_title(r.text)[:40]}".strip())
+
+
 JUDGES: dict[str, Callable[[Resp], Verdict]] = {
     "chatgpt_web": judge_chatgpt_web,
     "openai_api": judge_openai_api,
     "claude_web": judge_claude_web,
     "anthropic_api": judge_anthropic_api,
     "gemini_api": judge_gemini_api,
+    "tiktok_web": judge_tiktok_web,
 }
 
 
@@ -773,7 +883,9 @@ def probe_target(t: Target, gemini_key: str = "", cancel: CancelToken | None = N
                 gate()
             gate()
 
-            for key in services:
+            # Приложения — первыми: они идут мимо WARP, и нода, где запросы к ИИ
+            # виснут до таймаута, не должна съесть их долю бюджета хоста.
+            for key in sorted(services, key=lambda k: service_group(k) != GROUP_APPS):
                 if key == "gemini_web":
                     fn = lambda: _gemini_web(proxy)  # noqa: E731
                 elif key == "gemini_api":
@@ -781,7 +893,8 @@ def probe_target(t: Target, gemini_key: str = "", cancel: CancelToken | None = N
                 else:
                     judge = JUDGES[key]
                     url = URLS[key]
-                    fn = lambda judge=judge, url=url: judge(_get(url, proxy))  # noqa: E731
+                    tmo = TT_TIMEOUT if key == "tiktok_web" else REQ_TIMEOUT
+                    fn = lambda judge=judge, url=url, tmo=tmo: judge(_get(url, proxy, timeout=tmo))  # noqa: E731
                 v, n = _attempts(fn, deadline, cancel)
                 out["results"][key] = {"v": v.verdict, "note": v.note, "tries": n}
     except TunnelError as exc:
@@ -848,7 +961,7 @@ def summary_text(changes: list[dict]) -> str | None:
                 f"{SERVICE_NAMES.get(c['service'], c['service'])} ({c['before']} → {c['after']})")
         return [f"• {esc(h)}: {esc(', '.join(v))}" for h, v in by_host.items()]
 
-    out = ["🧠 <b>Доступ к ИИ: изменения</b>"]
+    out = ["🧠📱 <b>Доступность приложений: изменения</b>"]
     if broke:
         out += ["", "🔴 <b>Сломалось</b>", *lines(broke)]
     if fixed:

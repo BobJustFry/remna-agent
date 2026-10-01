@@ -64,7 +64,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/": "Дашборд",
   "/nodes": "Ноды",
   "/hostings": "Хостинги",
-  "/ai-access": "ИИ-доступ",
+  "/ai-access": "Доступность приложений",
   "/scripts": "Скрипты",
   "/settings": "Настройки",
   "/automation": "Автоматизация",

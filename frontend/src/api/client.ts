@@ -1020,9 +1020,17 @@ export type AiRun = {
   stopping: boolean;
 };
 
+/** Колонка матрицы. group — ai | apps: ИИ-сервисы отдельно от прочих приложений. */
+export type AiService = {
+  key: string;
+  name: string;
+  group: string;
+  group_name: string;
+};
+
 export type AiAccessStatus = {
   config: AiAccessConfig;
-  services: { key: string; name: string }[];
+  services: AiService[];
   /** Идущий прогон, полный или выборочный. Состояние живёт на сервере. */
   running: AiRun | null;
   /** Последний полный прогон любого исхода. */

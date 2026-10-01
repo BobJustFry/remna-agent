@@ -8,6 +8,7 @@ import {
   type AiHostRow,
   type AiHostState,
   type AiRun,
+  type AiService,
   type AiVerdict,
 } from "../api/client";
 import { CountryFlag } from "../components/CountryFlag";
@@ -20,6 +21,8 @@ const BTN =
 // Таблица с раздельными границами: со схлопнутыми липкая шапка теряет линии.
 const TH = "sticky top-0 bg-[var(--bg-elevated)] py-2 font-medium shadow-[0_1px_0_var(--border)]";
 const ROW_LINE = "border-t border-[var(--border)]";
+// Разделитель между группами колонок: ИИ отдельно, приложения отдельно.
+const GROUP_LINE = "border-l-2 border-l-[var(--border)]";
 
 // Пока идёт прогон — подтягиваем прогресс часто, в покое хватит раза в минуту.
 const POLL_RUNNING_MS = 5_000;
@@ -81,17 +84,29 @@ function fmtDuration(from: string, to: string | null) {
   return s < 90 ? `${s} с` : `${Math.round(s / 60)} мин`;
 }
 
+/** Колонки, с которых начинается новая группа сервисов: перед ними разделитель. */
+function groupStarts(services: AiService[]): Set<string> {
+  const out = new Set<string>();
+  services.forEach((s, i) => {
+    if (i > 0 && services[i - 1].group !== s.group) out.add(s.key);
+  });
+  return out;
+}
+
 /** Хост ещё в работе: ждёт очереди, проверяется или выходит из проверки. */
 function isBusy(state: AiHostState | null): boolean {
   return state === "queued" || state === "running" || state === "cancelling";
 }
 
 /**
- * Доступ к ИИ через каждый хост подписки.
+ * Доступность приложений через каждый хост подписки: нейросети и TikTok.
  *
- * Значок 🧠 в имени хоста — обещание клиенту. Держится оно на WARP и правилах
- * маршрутизации ноды, и ломается молча: клиент просто уходит с хоста. Здесь
- * видно, что обещание выполняется, и что поменялось с прошлого прогона.
+ * Значки 🧠 и 📱 в имени хоста — обещание клиенту. Про ИИ оно держится на
+ * WARP и правилах маршрутизации ноды, про TikTok — на том, что TikTok не
+ * пометил адрес выхода. Ломается всё молча: клиент просто уходит с хоста.
+ * Здесь видно, что обещание выполняется, и что поменялось с прошлого прогона.
+ *
+ * URL страницы и API остались прежними (/ai-access): на них завязаны скрипты.
  *
  * Проверить можно весь парк, отмеченные хосты или один. Кто в очереди и кто
  * проверяется, знает сервер: страница только рисует то, что пришло в статусе,
@@ -202,6 +217,8 @@ export function AiAccessPage() {
   }
 
   const { shown, last, services, last_partial: lastPartial } = status;
+  const starts = groupStarts(services);
+  const grouped = new Set(services.map((s) => s.group)).size > 1;
   const run = status.running;
   const failed = last && (last.status === "failed" || last.status === "aborted") ? last : null;
   const changedCount = status.rows.filter((r) => r.changed).length;
@@ -246,9 +263,9 @@ export function AiAccessPage() {
       <header className="border-b border-[var(--border)] px-4 py-3 sm:px-6 sm:py-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
-            <h1 className="hidden text-xl font-semibold tracking-tight lg:block">ИИ-доступ</h1>
+            <h1 className="hidden text-xl font-semibold tracking-tight lg:block">Доступность приложений</h1>
             <p className="text-sm text-[var(--muted)] lg:mt-0.5">
-              Открываются ли ChatGPT, Claude и Gemini через каждый хост подписки.
+              Открываются ли ChatGPT, Claude, Gemini и TikTok через каждый хост подписки.
             </p>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -280,9 +297,11 @@ export function AiAccessPage() {
         <div className="mx-auto max-w-[1600px] space-y-4">
           <p className="max-w-3xl text-xs leading-relaxed text-[var(--muted)]">
             Через каждый хост подписки поднимается отдельный клиент xray, и через него рагент
-            открывает ChatGPT, Claude, Gemini и их API с отпечатком браузера. Вердикт — по
+            открывает ChatGPT, Claude, Gemini, их API и TikTok с отпечатком браузера. Вердикт — по
             признакам (редирект, JSON-ошибка, маркеры отказа), а не по коду ответа. Челлендж
-            Cloudflare — не отказ по стране, а проверка на бота.
+            Cloudflare — не отказ по стране, а проверка на бота. TikTok работает, если отдаёт
+            страницу входа; заслонка WAF вместо неё («Please wait…», полтора килобайта вместо
+            сотен) — отказ: TikTok пометил адрес выхода.
           </p>
 
           {msg && (
@@ -441,8 +460,16 @@ export function AiAccessPage() {
                       </th>
                       <th className={`${TH} z-20 px-3`}>Выход ноды</th>
                       <th className={`${TH} z-20 px-3`}>Выход ИИ</th>
-                      {services.map((s) => (
-                        <th key={s.key} className={`${TH} z-20 px-2 text-center`}>
+                      {services.map((s, i) => (
+                        <th
+                          key={s.key}
+                          className={`${TH} z-20 px-2 text-center ${starts.has(s.key) ? GROUP_LINE : ""}`}
+                        >
+                          {grouped && (
+                            <div className="text-left text-[10px] font-normal uppercase tracking-wide opacity-70">
+                              {i === 0 || starts.has(s.key) ? s.group_name : "\u00a0"}
+                            </div>
+                          )}
                           <div>{s.name}</div>
                           <div className="mt-0.5 font-normal tabular-nums">
                             <span className="text-[var(--success)]">{counts[s.key]?.ok ?? 0}</span>
@@ -459,6 +486,7 @@ export function AiAccessPage() {
                         <HostRow
                           row={r}
                           services={services}
+                          starts={starts}
                           expanded={open === r.host_key}
                           onToggle={() => setOpen(open === r.host_key ? null : r.host_key)}
                           picked={selected.has(r.host_key)}
@@ -544,7 +572,7 @@ function ChangesList({
   services,
 }: {
   changes: AiChange[];
-  services: { key: string; name: string }[];
+  services: AiService[];
 }) {
   const names = Object.fromEntries(services.map((s) => [s.key, s.name]));
   return (
@@ -697,6 +725,7 @@ function RowAction({
 function HostRow({
   row,
   services,
+  starts,
   expanded,
   onToggle,
   picked,
@@ -707,7 +736,8 @@ function HostRow({
   onCancel,
 }: {
   row: AiHostRow;
-  services: { key: string; name: string }[];
+  services: AiService[];
+  starts: Set<string>;
   expanded: boolean;
   onToggle: () => void;
   picked: boolean;
@@ -775,7 +805,7 @@ function HostRow({
         <Exit ip={row.ai_ip} cc={row.ai_country} warp={row.ai_warp} prevCc={row.prev_ai_country} />
       </td>
       {services.map((s) => (
-        <td key={s.key} className={`${ROW_LINE} px-2 py-1.5 text-center`}>
+        <td key={s.key} className={`${ROW_LINE} px-2 py-1.5 text-center ${starts.has(s.key) ? GROUP_LINE : ""}`}>
           <Cell cell={row.results[s.key]} />
         </td>
       ))}
@@ -796,7 +826,7 @@ function HostRow({
   );
 }
 
-function HostHistory({ hostKey, services }: { hostKey: string; services: { key: string; name: string }[] }) {
+function HostHistory({ hostKey, services }: { hostKey: string; services: AiService[] }) {
   const [hist, setHist] = useState<AiHostHistory | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -815,6 +845,7 @@ function HostHistory({ hostKey, services }: { hostKey: string; services: { key: 
   if (!hist) return <div className="text-xs text-[var(--muted)]">Загрузка истории…</div>;
   if (!hist.points.length) return <div className="text-xs text-[var(--muted)]">За 30 дней записей нет</div>;
 
+  const grouped = new Set(services.map((s) => s.group)).size > 1;
   const exits = hist.points.reduce<{ at: string; cc: string | null; ip: string | null }[]>((acc, p) => {
     const lastExit = acc[acc.length - 1];
     if (!lastExit || lastExit.cc !== p.ai_country) acc.push({ at: p.checked_at, cc: p.ai_country, ip: p.ai_ip });
@@ -827,8 +858,13 @@ function HostHistory({ hostKey, services }: { hostKey: string; services: { key: 
         История за {hist.days} дней · проверок {hist.points.length} · старые слева, свежие справа
       </div>
       <div className="grid grid-cols-[max-content_1fr] items-center gap-x-3 gap-y-1.5">
-        {services.map((s) => (
+        {services.map((s, i) => (
           <Fragment key={s.key}>
+            {grouped && (i === 0 || services[i - 1].group !== s.group) && (
+              <span className={`col-span-2 text-[10px] uppercase tracking-wide text-[var(--muted)] opacity-70 ${i ? "mt-1" : ""}`}>
+                {s.group_name}
+              </span>
+            )}
             <span className="text-xs text-[var(--muted)]">{s.name}</span>
             <span className="flex flex-wrap gap-[3px]">
               {hist.points.map((p) => {
@@ -967,8 +1003,8 @@ function AiAccessSettings({
             Сводка изменений в Telegram
           </label>
           <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
-            Пишем, только когда что-то сломалось (ok → отказ или челлендж), починилось или сменилась
-            страна выхода ИИ. Таймауты не шлём — это лежащая нода, про неё скажут другие проверки.
+            Пишем, только когда у ИИ или TikTok что-то сломалось (ok → отказ или челлендж),
+            починилось или сменилась страна выхода ИИ. Таймауты не шлём — это лежащая нода, про неё скажут другие проверки.
             Бот — тот же, что у следилки{cfg.bot_ready ? "" : " (сейчас не настроен)"}.
           </p>
           <label className="mt-2 block">

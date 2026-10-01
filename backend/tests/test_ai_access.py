@@ -78,6 +78,34 @@ GEMINI_OTHER_ERR = (
 )
 TRACE = "fl=1\nh=chatgpt.com\nip=104.28.0.1\nloc=PL\nwarp=on\ngateway=off\n"
 
+# TikTok. Признаки из замера 10.09: рабочий выход — настоящая страница в сотни КБ
+# (в ней есть и скрипты slardar, и строки вроде «Please wait…» — по ним одним
+# судить нельзя), помеченный адрес — заслонка WAF ~1,5 КБ.
+TT_URL = "https://www.tiktok.com/login"
+
+
+def _tt_page(title: str = "Log in | TikTok", region: str = "NL", pad: int = 200_000) -> str:
+    return (
+        f"<!DOCTYPE html><html lang='en'><head><title>{title}</title>"
+        "<script>window.SLARDAR_WEB_ID=1;</script></head><body><div id='app'></div>"
+        '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">'
+        '{"__DEFAULT_SCOPE__":{"webapp.app-context":{"language":"en","region":"' + region + '",'
+        '"appId":1233},"seo.abtest":{"region":"US"}}}</script>'
+        "<script>var i18n={wait:'Please wait...'};/*" + "x" * pad + "*/</script></body></html>"
+    )
+
+
+TT_LOGIN = _tt_page()
+TT_LOGIN_RU = _tt_page(region="RU")
+TT_WAF = (
+    "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Please wait...</title></head><body>"
+    "<script>window._wafchallengeid='eyJ2IjoxfQ';</script>"
+    "<script src='https://sf16-website-login.neutral.ttwstatic.com/obj/tiktok_web_login_static/"
+    "slardar_us_waf/browser.js'></script><p>Please wait...</p>" + " " * 1100 + "</body></html>"
+)
+TT_HTML = {"content-type": "text/html; charset=utf-8"}
+TT_TLB = {**TT_HTML, "server": "TLB"}
+
 
 class JudgeTests(unittest.TestCase):
     def test_chatgpt(self) -> None:
@@ -140,6 +168,73 @@ class JudgeTests(unittest.TestCase):
         bad = '{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}'
         v = ai.judge_gemini_api(Resp(400, url, bad, JSON))
         self.assertEqual((v.verdict, v.note), (ai.ERROR, "400 ключ не принят"))
+
+
+class TikTokTests(unittest.TestCase):
+    def test_login_page_is_ok(self) -> None:
+        # Server: TLB у рабочей страницы тоже бывает — он ничего не решает.
+        for headers in (TT_HTML, TT_TLB):
+            v = ai.judge_tiktok_web(Resp(200, TT_URL, TT_LOGIN, headers))
+            self.assertEqual(v.verdict, ai.OK)
+            self.assertTrue(v.note.startswith("200 /login, "), v.note)
+            self.assertIn("регион NL", v.note)                # из app-context, а не из seo.abtest
+            self.assertNotIn("расхождение", v.note)
+        # Редирект внутри страницы входа — та же страница.
+        v = ai.judge_tiktok_web(Resp(200, "https://www.tiktok.com/login/phone-or-email", TT_LOGIN,
+                                     TT_HTML, [TT_URL]))
+        self.assertEqual(v.verdict, ai.OK)
+
+    def test_waf_wall_is_blocked(self) -> None:
+        self.assertLess(len(TT_WAF), 2000)
+        for code, headers in ((200, TT_TLB), (200, TT_HTML), (403, TT_TLB)):
+            v = ai.judge_tiktok_web(Resp(code, TT_URL, TT_WAF, headers))
+            self.assertEqual(v.verdict, ai.BLOCKED, (code, headers))
+            self.assertIn("заслонка WAF", v.note)
+            self.assertIn("1,", v.note)                       # размер в КБ — виден сразу
+        self.assertIn("Server: TLB", ai.judge_tiktok_web(Resp(200, TT_URL, TT_WAF, TT_TLB)).note)
+        # Одно «Please wait…» без данных приложения — тоже заслонка.
+        bare = "<html><head><title>Please wait…</title></head><body>Please wait…</body></html>"
+        self.assertEqual(ai.judge_tiktok_web(Resp(200, TT_URL, bare, TT_HTML)).verdict, ai.BLOCKED)
+
+    def test_russian_region_is_blocked(self) -> None:
+        v = ai.judge_tiktok_web(Resp(200, TT_URL, TT_LOGIN_RU, TT_HTML))
+        self.assertEqual(v.verdict, ai.BLOCKED)
+        self.assertIn("регион RU", v.note)
+        self.assertIn("урезан", v.note)
+
+    def test_no_login_page_is_blocked_even_if_page_is_big(self) -> None:
+        # Признаки разошлись: по размеру страница настоящая, но входа нет —
+        # вердикт по странице входа, расхождение видно в note.
+        page = _tt_page(title="Explore | TikTok")
+        v = ai.judge_tiktok_web(Resp(200, "https://www.tiktok.com/explore", page, TT_HTML, [TT_URL]))
+        self.assertEqual(v.verdict, ai.BLOCKED)
+        self.assertIn("нет страницы входа", v.note)
+        self.assertIn("расхождение", v.note)
+
+    def test_small_login_page_is_ok_with_note(self) -> None:
+        v = ai.judge_tiktok_web(Resp(200, TT_URL, _tt_page(pad=10), TT_HTML))
+        self.assertEqual(v.verdict, ai.OK)
+        self.assertIn("расхождение", v.note)
+
+    def test_unknown_answers_are_errors(self) -> None:
+        tiny = ai.judge_tiktok_web(Resp(200, TT_URL, "<html><body>ok</body></html>", TT_HTML))
+        self.assertEqual(tiny.verdict, ai.ERROR)               # не отказ: такой страницы мы не видели
+        self.assertEqual(ai.judge_tiktok_web(Resp(502, TT_URL, "bad gateway", TT_TLB)).verdict, ai.ERROR)
+        region = ai.judge_tiktok_web(Resp(200, TT_URL, "<html><body>TikTok is not available in your "
+                                          "country or region</body></html>", TT_HTML))
+        self.assertEqual(region.verdict, ai.BLOCKED)
+
+    def test_region(self) -> None:
+        self.assertEqual(ai.tiktok_region(TT_LOGIN), "NL")
+        self.assertIsNone(ai.tiktok_region(TT_WAF))
+
+    def test_service_groups(self) -> None:
+        full = ai.service_list(with_gemini_api=True)
+        self.assertEqual([s["key"] for s in full][-1], "tiktok_web")     # приложения — после ИИ
+        self.assertEqual({s["key"]: s["group"] for s in full}["tiktok_web"], ai.GROUP_APPS)
+        self.assertEqual({s["group"] for s in full if s["key"] != "tiktok_web"}, {ai.GROUP_AI})
+        self.assertEqual(full[-1]["group_name"], "Приложения")
+        self.assertNotIn("gemini_api", [s["key"] for s in ai.service_list(with_gemini_api=False)])
 
 
 class GeminiTests(unittest.TestCase):
@@ -302,6 +397,27 @@ class DiffTests(unittest.TestCase):
         self.assertIn("PL → DE", text)
         self.assertNotIn("NO", text)          # таймаут — не повод будить людей
 
+    def test_tiktok_counts_like_ai(self) -> None:
+        prev = {"KZ": self._row("KZ", tiktok_web="ok", chatgpt_web="ok"),
+                "TR": self._row("TR", tiktok_web="blocked")}
+        cur = {"KZ": self._row("KZ", tiktok_web="blocked", chatgpt_web="ok"),
+               "TR": self._row("TR", tiktok_web="ok")}
+        changes = ai.diff_runs(prev, cur)
+        self.assertEqual({(c["host_key"], c["service"], c["before"], c["after"]) for c in changes},
+                         {("KZ", "tiktok_web", "ok", "blocked"), ("TR", "tiktok_web", "blocked", "ok")})
+        text = ai.summary_text(changes)
+        assert text is not None
+        self.assertIn("Доступность приложений", text)
+        self.assertIn("KZ: TikTok (ok → blocked)", text)
+        self.assertIn("TR: TikTok (blocked → ok)", text)
+
+    def test_old_runs_without_tiktok_are_not_a_change(self) -> None:
+        # Прогоны до появления TikTok: колонки нет — это не «сломалось» и не «починилось».
+        prev = {"DE": self._row("DE", chatgpt_web="ok")}
+        cur = {"DE": self._row("DE", chatgpt_web="ok", tiktok_web="blocked")}
+        self.assertEqual(ai.diff_runs(prev, cur), [])
+        self.assertIsNone(ai.summary_text(ai.diff_runs(prev, cur)))
+
     def test_nothing_notable(self) -> None:
         changes = [{"host": "X", "host_key": "X", "service": "chatgpt_web", "before": "ok", "after": "timeout"}]
         self.assertIsNone(ai.summary_text(changes))
@@ -336,7 +452,9 @@ class ProbeTests(unittest.TestCase):
             ai.URLS["chatgpt_web"]: Resp(200, "https://chatgpt.com/", CHATGPT_OK, HTML),
             ai.URLS["openai_api"]: Resp(401, "https://api.openai.com/v1/models", OPENAI_401, JSON),
             ai.URLS["anthropic_api"]: Resp(403, "https://api.anthropic.com/v1/models", ANTHROPIC_403, JSON),
+            ai.URLS["tiktok_web"]: Resp(200, TT_URL, TT_LOGIN, TT_TLB),
         }
+        asked: list[tuple[str, float]] = []
         claude_calls = iter([
             RuntimeError("Failed to perform, curl: (28) Operation timed out"),
             Resp(403, "https://claude.ai/login", CF_CHALLENGE, {**HTML, "cf-mitigated": "challenge"}),
@@ -344,6 +462,7 @@ class ProbeTests(unittest.TestCase):
         ])
 
         def fake_get(url, proxy, timeout=ai.REQ_TIMEOUT, **kw):
+            asked.append((url, timeout))
             if url == ai.URLS["claude_web"]:
                 nxt = next(claude_calls)
                 if isinstance(nxt, Exception):
@@ -356,6 +475,14 @@ class ProbeTests(unittest.TestCase):
                 mock.patch.object(ai, "_gemini_web", return_value=ai.Verdict(ai.BLOCKED, "ошибка 1060")):
             out = ai.probe_target(self._target())
 
+        # TikTok — первым после trace (мимо WARP, бюджет хоста не съеден ИИ),
+        # один запрос и свой таймаут на тяжёлую страницу.
+        services_asked = [u for u, _ in asked if u not in (ai.URLS["trace_direct"], ai.URLS["trace_ai"])]
+        self.assertEqual(services_asked[0], ai.URLS["tiktok_web"])
+        self.assertEqual([t for u, t in asked if u == ai.URLS["tiktok_web"]], [ai.TT_TIMEOUT])
+        self.assertEqual(out["results"]["tiktok_web"]["v"], ai.OK)
+        self.assertEqual(out["results"]["tiktok_web"]["tries"], 1)
+
         self.assertEqual(out["tunnel"], "up")
         self.assertEqual((out["exit_ip"], out["exit_country"]), ("198.51.100.2", "DE"))
         self.assertEqual((out["ai_ip"], out["ai_country"], out["ai_warp"]), ("104.28.0.1", "PL", "on"))
@@ -367,6 +494,40 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(res["gemini_web"]["v"], ai.BLOCKED)
         # Таймаут и челлендж перебиты определённым ответом на третьей попытке.
         self.assertEqual((res["claude_web"]["v"], res["claude_web"]["tries"]), (ai.OK, 3))
+
+    def test_tiktok_timeout_and_waf(self) -> None:
+        tiktok = iter([RuntimeError("Failed to perform, curl: (28) Operation timed out after 30001 ms"),
+                       RuntimeError("Failed to perform, curl: (28) Operation timed out after 30001 ms"),
+                       RuntimeError("Failed to perform, curl: (28) Operation timed out after 30001 ms")])
+
+        def fake_get(url, proxy, timeout=ai.REQ_TIMEOUT, **kw):
+            if url == ai.URLS["trace_direct"]:
+                return Resp(200, "", "ip=198.51.100.2\nloc=TR\n")
+            if url == ai.URLS["tiktok_web"]:
+                raise next(tiktok)
+            raise RuntimeError("curl: (97) Can't complete SOCKS5 connection.")
+
+        with mock.patch.object(ai, "xray_tunnel", self._tunnel), \
+                mock.patch.object(ai, "_get", side_effect=fake_get), \
+                mock.patch.object(ai, "_gemini_web", return_value=ai.Verdict(ai.ERROR, "x")):
+            out = ai.probe_target(self._target())
+        cell = out["results"]["tiktok_web"]
+        self.assertEqual((cell["v"], cell["tries"]), (ai.TIMEOUT, 3))     # таймаут — не отказ
+
+        # Заслонка с первой попытки — определённый ответ, повторов нет.
+        def waf_get(url, proxy, timeout=ai.REQ_TIMEOUT, **kw):
+            if url == ai.URLS["trace_direct"]:
+                return Resp(200, "", "ip=198.51.100.2\nloc=KZ\n")
+            if url == ai.URLS["tiktok_web"]:
+                return Resp(200, TT_URL, TT_WAF, TT_TLB)
+            raise RuntimeError("curl: (97) Can't complete SOCKS5 connection.")
+
+        with mock.patch.object(ai, "xray_tunnel", self._tunnel), \
+                mock.patch.object(ai, "_get", side_effect=waf_get), \
+                mock.patch.object(ai, "_gemini_web", return_value=ai.Verdict(ai.ERROR, "x")):
+            out = ai.probe_target(self._target())
+        cell = out["results"]["tiktok_web"]
+        self.assertEqual((cell["v"], cell["tries"]), (ai.BLOCKED, 1))
 
     def test_tunnel_down(self) -> None:
         with mock.patch.object(ai, "xray_tunnel", self._tunnel), \
@@ -1073,6 +1234,57 @@ class MatrixTests(unittest.TestCase):
         pairs = [self._check(f1, "DE", 1, "timeout"), self._check(f1, "DE", 5, "ok")]
         rows = ai.build_matrix(pairs, f1, None, ["DE"])
         self.assertEqual(self._verdicts(rows), {"DE": ("ok", None)})
+
+
+try:      # API тянет зависимости веб-приложения; без них проверяем только сервис
+    from app.api import ai_access as ai_api
+except ImportError:  # pragma: no cover
+    ai_api = None
+
+
+@unittest.skipIf(ai_api is None, "нет зависимостей веб-приложения")
+class ApiShapeTests(unittest.IsolatedAsyncioTestCase):
+    """Колонка TikTok в статусе и истории; старые прогоны без неё страницу не ломают."""
+
+    OLD = {"chatgpt_web": {"v": "ok", "note": "200", "tries": 1}}
+    NEW = {"chatgpt_web": {"v": "ok", "note": "200", "tries": 1},
+           "tiktok_web": {"v": "blocked", "note": "200 заслонка WAF, 1,4 КБ", "tries": 1}}
+
+    def _check(self, at: float, results: dict):
+        return SimpleNamespace(
+            run_id=uuid.uuid4(), host="🇰🇿 KZ", host_key="KZ", checked_at=_at(at), position=0,
+            tunnel="up", exit_ip="198.51.100.9", exit_country="KZ", ai_ip="104.28.0.9",
+            ai_country="KZ", ai_warp="on", duration_ms=10, error=None, results=results)
+
+    def test_status_row(self) -> None:
+        old, new = self._check(0, self.OLD), self._check(720, self.NEW)
+        # Свежий результат с TikTok против прошлого без него: ячейка есть, «было» пусто,
+        # строка не считается изменившейся.
+        row = ai_api._row(ai.MatrixRow("KZ", new, old, is_new=False, partial=False))
+        self.assertEqual(row.results["tiktok_web"].verdict, "blocked")
+        self.assertIsNone(row.results["tiktok_web"].prev)
+        self.assertFalse(row.changed)
+        # Строка из старого прогона: ключа нет — на странице пустая ячейка, а не ошибка.
+        row = ai_api._row(ai.MatrixRow("KZ", old, None, is_new=False, partial=False))
+        self.assertNotIn("tiktok_web", row.results)
+        cols = [ai_api.AiServiceOut(**s) for s in ai.service_list(False)]
+        self.assertEqual((cols[-1].key, cols[-1].group), ("tiktok_web", "apps"))
+
+    async def test_history_mixes_old_and_new_points(self) -> None:
+        checks = [self._check(0, self.OLD), self._check(720, self.NEW)]
+
+        class FakeResult:
+            def scalars(self):
+                return iter(checks)
+
+        db = mock.Mock()
+        db.execute = mock.AsyncMock(return_value=FakeResult())
+        out = await ai_api.host_history(key="KZ", days=30, _="admin", db=db)
+        self.assertEqual(len(out.points), 2)
+        self.assertNotIn("tiktok_web", out.points[0].results)
+        self.assertEqual(out.points[1].results["tiktok_web"].verdict, "blocked")
+        # В ответе схема, которую страница рисует без особых случаев.
+        self.assertEqual(out.model_dump()["points"][0]["results"].get("tiktok_web"), None)
 
 
 if __name__ == "__main__":

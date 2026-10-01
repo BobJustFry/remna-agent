@@ -1,4 +1,9 @@
-"""Доступ к ИИ через хосты: матрица, история, запуск и отмена проверок, настройки."""
+"""Доступность приложений (ИИ и TikTok) через хосты: матрица, история, запуск
+и отмена проверок, настройки.
+
+Префикс /ai-access остался со времён, когда проверялся только ИИ: на него
+завязаны скрипты, поэтому не меняем.
+"""
 from __future__ import annotations
 
 from datetime import timedelta
@@ -152,8 +157,7 @@ async def _status(db: AsyncSession) -> AiAccessStatusOut:
                                          state=h["state"], is_new=shown is not None))
 
     has_gemini_api = bool(await ai_access.gemini_key(db)) or any("gemini_api" in r.results for r in rows)
-    services = [AiServiceOut(key=k, name=n) for k, n in ai_access.SERVICES
-                if k != "gemini_api" or has_gemini_api]
+    services = [AiServiceOut(**s) for s in ai_access.service_list(has_gemini_api)]
 
     # Расписание считается по полным прогонам: выборочные его не сдвигают.
     pending_full = live["pending_full"] if live else None

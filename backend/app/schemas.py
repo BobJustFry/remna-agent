@@ -613,7 +613,7 @@ class PanelBackupStatusOut(BaseModel):
     disk_free_bytes: int | None = None
 
 
-# ── доступ к ИИ через хосты ──────────────────────────────────────────────────
+# ── доступность приложений (ИИ, TikTok) через хосты ─────────────────────────
 
 class AiAccessConfigOut(BaseModel):
     enabled: bool = True
@@ -647,6 +647,8 @@ class AiAccessConfigUpdate(BaseModel):
 class AiServiceOut(BaseModel):
     key: str
     name: str
+    group: str = "ai"             # ai | apps — колонки матрицы идут группами
+    group_name: str = "ИИ"
 
 
 class AiCellOut(BaseModel):
