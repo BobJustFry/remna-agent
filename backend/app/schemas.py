@@ -571,6 +571,69 @@ class SubwatchStatusOut(BaseModel):
     uptime_24h: float | None = None
 
 
+class YcVmOut(BaseModel):
+    id: str | None = None
+    name: str | None = None
+    status: str = "UNKNOWN"
+    ip: str | None = None
+
+
+class YcCheckOut(BaseModel):
+    checked_at: datetime
+    ok: bool
+    balance: float | None = None
+    currency: str | None = None
+    account_active: bool | None = None
+    vms: list[YcVmOut] = Field(default_factory=list)
+    duration_ms: int = 0
+    error: str | None = None
+
+
+class YcwatchConfigOut(BaseModel):
+    enabled: bool = True
+    interval_min: int = 60
+    billing_account_id: str = ""
+    folder_id: str = ""
+    instance_id: str = ""
+    warn_rub: float = 300
+    remind_min: int = 60
+    remind_low_hours: int = 24
+    notify: bool = True
+    chat_id: str = ""
+    sa_key_set: bool = False
+    # Не секрет: id ключа и СА видны в консоли — по ним понятно, какой ключ стоит.
+    sa_key_id: str | None = None
+    sa_id: str | None = None
+    bot_ready: bool = False
+
+
+class YcwatchConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    interval_min: int | None = Field(default=None, ge=5, le=1440)
+    billing_account_id: str | None = Field(default=None, max_length=64)
+    folder_id: str | None = Field(default=None, max_length=64)
+    instance_id: str | None = Field(default=None, max_length=64)
+    warn_rub: float | None = Field(default=None, ge=0, le=1_000_000)
+    remind_min: int | None = Field(default=None, ge=0, le=1440)          # 0 — не напоминать
+    remind_low_hours: int | None = Field(default=None, ge=0, le=168)     # 0 — не напоминать
+    notify: bool | None = None
+    chat_id: str | None = None
+    sa_key: str | None = Field(default=None, max_length=20_000)  # authorized key JSON; "" стирает
+
+
+class YcwatchStatusOut(BaseModel):
+    config: YcwatchConfigOut
+    level: str | None = None          # ok | low | critical | blind
+    since: datetime | None = None
+    fails: int = 0
+    reasons: list[str] = Field(default_factory=list)
+    last: YcCheckOut | None = None    # последний опрос, удачный или нет
+    last_ok: YcCheckOut | None = None  # последний, где облако ответило
+    burn_per_day: float | None = None
+    days_left: float | None = None
+    history: list[YcCheckOut] = Field(default_factory=list)
+
+
 class BackupFileOut(BaseModel):
     name: str
     size: int

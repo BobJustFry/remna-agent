@@ -9,7 +9,9 @@ import { formatBytes, HaproxyStatsView } from "../components/HaproxyStatsView";
 import { NodeMetricsGrid } from "../components/NodeMetricsGrid";
 import { OnlineBadge } from "../components/OnlineBadge";
 import { SubStatusCard } from "../components/SubStatusCard";
+import { YcStatusCard } from "../components/YcStatusCard";
 import { agentNeedsUpdate, remnanodeNeedsUpdate } from "../hooks/useRemnawaveVersions";
+import { useYcwatch } from "../hooks/useYcwatch";
 import { countryName } from "../lib/countries";
 import type { NodeDownMap } from "../lib/nodeWatch";
 import type { AgentStatus, NodeItem, OnlineStatus } from "../types";
@@ -77,6 +79,7 @@ export function DashboardPage() {
   } = useOutletContext<AppOutletContext>();
 
   const [tab, setTab] = useState<DashTab>(() => readTab());
+  const { status: ycwatch, setStatus: setYcwatch } = useYcwatch(true);
   const [hpStats, setHpStats] = useState<Record<string, HaproxyLiveStats>>({});
   const [hpLoading, setHpLoading] = useState(false);
 
@@ -177,8 +180,9 @@ export function DashboardPage() {
             </p>
           )}
         </div>
-        <div className="min-w-0 sm:max-w-2xl sm:flex-1">
+        <div className="flex min-w-0 flex-col gap-1.5 sm:max-w-2xl sm:flex-1">
           <SubStatusCard status={subwatch} onRefreshed={() => void refreshSubwatch()} />
+          <YcStatusCard status={ycwatch} onRefreshed={setYcwatch} />
         </div>
       </header>
 

@@ -279,3 +279,26 @@ class AiCheck(Base):
     # {сервис: {"v": вердикт, "note": признак, "tries": попыток}}
     results: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class YcCheck(Base):
+    """Один опрос Yandex Cloud: баланс платёжного аккаунта и статус ВМ.
+
+    Пишем каждый опрос, удачный или нет: по ряду балансов видно, с какой
+    скоростью тают деньги, а по ошибкам — с какого часа облако нам не отвечает.
+    """
+
+    __tablename__ = "yc_checks"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)   # оба запроса ответили
+    balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    account_active: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # [{"id", "name", "status", "ip"}] — как было в момент опроса
+    vms: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)

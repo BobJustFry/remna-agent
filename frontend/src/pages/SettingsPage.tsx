@@ -3,6 +3,7 @@ import { useOutletContext } from "react-router-dom";
 import { api, type ApiToken } from "../api/client";
 import { NodeWatchSettings } from "../components/NodeWatchSettings";
 import { SubwatchSettings } from "../components/SubwatchSettings";
+import { YcwatchSettings } from "../components/YcwatchSettings";
 import type { AppOutletContext } from "../components/AppShell";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { CopyButton } from "../components/CopyButton";
@@ -139,6 +140,8 @@ export function SettingsPage() {
             </section>
 
             <SubwatchSettings />
+
+            <YcwatchSettings />
 
             <NodeWatchSettings nodes={nodes} onChanged={() => void refreshNodeWatch()} />
 

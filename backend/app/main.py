@@ -19,6 +19,7 @@ from app.api import (
     settings as settings_api,
     sharing,
     subwatch as subwatch_api,
+    ycwatch as ycwatch_api,
 )
 from app.config import assert_secure_settings, settings
 from app.services import ai_access
@@ -26,6 +27,7 @@ from app.services.metrics_sampler import run_metrics_sampler
 from app.services.sharing_scanner import run_sharing_scanner
 from app.services.panel_backup import run_panel_backup
 from app.services.subwatch import run_subwatch
+from app.services.ycwatch import run_ycwatch
 
 logging.basicConfig(level=logging.INFO)
 
@@ -39,11 +41,13 @@ async def lifespan(_app: FastAPI):
     subwatch_task = asyncio.create_task(run_subwatch(), name="subwatch")
     backup_task = asyncio.create_task(run_panel_backup(), name="panel-backup")
     ai_task = asyncio.create_task(ai_access.run_ai_access(), name="ai-access")
+    # Без ключа СА в базе только ждёт: в облако не ходит.
+    yc_task = asyncio.create_task(run_ycwatch(), name="ycwatch")
     try:
         yield
     finally:
         await ai_access.shutdown()
-        for task in (metrics, sharing_task, subwatch_task, backup_task, ai_task):
+        for task in (metrics, sharing_task, subwatch_task, backup_task, ai_task, yc_task):
             task.cancel()
             try:
                 await task
@@ -86,6 +90,7 @@ app.include_router(subwatch_api.router, prefix="/api")
 app.include_router(panel_backup_api.router, prefix="/api")
 app.include_router(ai_access_api.router, prefix="/api")
 app.include_router(node_watch_api.router, prefix="/api")
+app.include_router(ycwatch_api.router, prefix="/api")
 
 
 @app.get("/api/health")

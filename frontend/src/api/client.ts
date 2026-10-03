@@ -171,6 +171,14 @@ export const api = {
   subwatchTelegramTest: () =>
     request<{ sent: boolean }>("/api/subwatch/telegram/test", { method: "POST" }),
 
+  ycwatchStatus: () => request<YcwatchStatus>("/api/ycwatch/status"),
+  ycwatchCheck: () => request<YcwatchStatus>("/api/ycwatch/check", { method: "POST" }),
+  ycwatchUpdate: (payload: YcwatchUpdate) =>
+    request<YcwatchStatus>("/api/ycwatch/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
   aiAccessStatus: () => request<AiAccessStatus>("/api/ai-access/status"),
   /** Без ключей — весь парк; с ключами — только эти хосты (встают в очередь идущего прогона). */
   aiAccessRun: (hosts?: string[]) =>
@@ -818,6 +826,61 @@ export type SubwatchStatus = {
 
 export type SubwatchUpdate = Partial<
   Omit<SubwatchConfig, "bot_token_set"> & { bot_token: string }
+>;
+
+export type YcVm = {
+  id: string | null;
+  name: string | null;
+  status: string;
+  ip: string | null;
+};
+
+export type YcCheck = {
+  checked_at: string;
+  ok: boolean;
+  balance: number | null;
+  currency: string | null;
+  account_active: boolean | null;
+  vms: YcVm[];
+  duration_ms: number;
+  error: string | null;
+};
+
+export type YcwatchConfig = {
+  enabled: boolean;
+  interval_min: number;
+  billing_account_id: string;
+  folder_id: string;
+  instance_id: string;
+  warn_rub: number;
+  remind_min: number;
+  remind_low_hours: number;
+  notify: boolean;
+  chat_id: string;
+  sa_key_set: boolean;
+  sa_key_id: string | null;
+  sa_id: string | null;
+  bot_ready: boolean;
+};
+
+/** ok — всё хорошо, low — денег меньше порога, critical — ноль/минус или ВМ не RUNNING, blind — облако не отвечает. */
+export type YcLevel = "ok" | "low" | "critical" | "blind";
+
+export type YcwatchStatus = {
+  config: YcwatchConfig;
+  level: YcLevel | null;
+  since: string | null;
+  fails: number;
+  reasons: string[];
+  last: YcCheck | null;
+  last_ok: YcCheck | null;
+  burn_per_day: number | null;
+  days_left: number | null;
+  history: YcCheck[];
+};
+
+export type YcwatchUpdate = Partial<
+  Omit<YcwatchConfig, "sa_key_set" | "sa_key_id" | "sa_id" | "bot_ready"> & { sa_key: string }
 >;
 
 export type BackupFile = {
