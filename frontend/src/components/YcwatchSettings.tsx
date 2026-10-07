@@ -219,6 +219,11 @@ export function YcwatchSettings() {
               Сейчас стоит ключ <code className="font-mono">{cfg.sa_key_id}</code> СА{" "}
               <code className="font-mono">{cfg.sa_id}</code>.
             </>
+          ) : cfg.sa_key_broken ? (
+            <span className="text-[var(--danger)]">
+              Ключ в базе есть, но не расшифровывается — похоже, сменился ключ шифрования. Облако мы
+              не видим; вставьте ключ заново.
+            </span>
           ) : (
             "Ключ не задан — следилка ждёт."
           )}

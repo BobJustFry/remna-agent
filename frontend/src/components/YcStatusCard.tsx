@@ -35,13 +35,13 @@ export function YcStatusCard({
 
   if (!status) return null;
 
-  if (!status.config.enabled || !status.config.sa_key_set) {
+  if (!status.config.enabled || (!status.config.sa_key_set && !status.config.sa_key_broken)) {
     return (
       <Link
         to="/settings"
         className="inline-flex items-center gap-2 rounded-[var(--radius)] border border-dashed border-[var(--border)] px-3 py-1.5 text-xs text-[var(--muted)] hover:text-[var(--text)]"
       >
-        Следилка за Yandex Cloud {status.config.sa_key_set ? "выключена" : "без ключа"} — настроить
+        Следилка за Yandex Cloud {status.config.enabled ? "без ключа" : "выключена"} — настроить
       </Link>
     );
   }
@@ -71,6 +71,10 @@ export function YcStatusCard({
     }
   }
 
+  // Последний опрос не удался — всё, что ниже, взято из прошлого удачного и может
+  // быть многодневной давности. Показываем это прямо, иначе рядом с красной точкой
+  // висит бодрый баланс, которого давно нет.
+  const stale = !!last && !last.ok;
   const balance = ok?.balance;
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] px-3 py-2">
@@ -93,19 +97,26 @@ export function YcStatusCard({
       {balance !== null && balance !== undefined && (
         <span
           className={`text-xs tabular-nums ${
-            balance <= 0
-              ? "text-[var(--danger)]"
-              : balance < status.config.warn_rub
-                ? "text-[var(--warning)]"
-                : "text-[var(--muted)]"
+            stale
+              ? "text-[var(--muted)]"
+              : balance <= 0
+                ? "text-[var(--danger)]"
+                : balance < status.config.warn_rub
+                  ? "text-[var(--warning)]"
+                  : "text-[var(--muted)]"
           }`}
-          title={`порог предупреждения ${money(status.config.warn_rub, ok?.currency)}`}
+          title={
+            stale
+              ? `данные последнего удачного опроса, ${ago(ok?.checked_at)}; сейчас облако не отвечает`
+              : `порог предупреждения ${money(status.config.warn_rub, ok?.currency)}`
+          }
         >
-          баланс {money(balance, ok?.currency)}
+          {stale ? "было " : ""}баланс {money(balance, ok?.currency)}
+          {stale ? ` (${ago(ok?.checked_at)})` : ""}
         </span>
       )}
 
-      {status.days_left !== null && status.burn_per_day !== null && (
+      {!stale && status.days_left !== null && status.burn_per_day !== null && (
         <span
           className={`text-xs tabular-nums ${status.days_left <= 3 ? "text-[var(--warning)]" : "text-[var(--muted)]"}`}
           title={`расход ~${money(status.burn_per_day, ok?.currency)}/сут по последним суткам`}
@@ -117,13 +128,21 @@ export function YcStatusCard({
       {ok?.vms.map((vm) => (
         <span
           key={vm.id ?? vm.name ?? "vm"}
-          className={`text-xs tabular-nums ${vm.status === "RUNNING" ? "text-[var(--muted)]" : "text-[var(--danger)]"}`}
-          title={`${vm.name ?? vm.id ?? ""}${vm.ip ? ` · ${vm.ip}` : ""}`}
+          className={`text-xs tabular-nums ${
+            stale || vm.status === "RUNNING" ? "text-[var(--muted)]" : "text-[var(--danger)]"
+          }`}
+          title={`${vm.name ?? vm.id ?? ""}${vm.ip ? ` · ${vm.ip}` : ""}${
+            stale ? ` · состояние на ${ago(ok?.checked_at)}` : ""
+          }`}
         >
           ВМ {vm.status}
         </span>
       ))}
-      {ok && ok.vms.length === 0 && <span className="text-xs text-[var(--danger)]">ВМ не найдена</span>}
+      {ok && ok.vms.length === 0 && (
+        <span className={`text-xs ${stale ? "text-[var(--muted)]" : "text-[var(--danger)]"}`}>
+          ВМ не найдена
+        </span>
+      )}
 
       {last && (
         <span className="text-xs text-[var(--muted)] tabular-nums" title={last.error ?? undefined}>

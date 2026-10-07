@@ -28,10 +28,12 @@ def _row(c: YcCheck) -> YcCheckOut:
 
 
 async def _config_out(db: AsyncSession, cfg: dict) -> YcwatchConfigOut:
-    key = await ycwatch.get_key(db)
+    key_state, key = await ycwatch.read_key(db)
     return YcwatchConfigOut(
         **{k: cfg.get(k, v) for k, v in ycwatch.DEFAULTS.items()},
         sa_key_set=key is not None,
+        # Ключ лежит, но не расшифровывается — это не «не настроено», а поломка.
+        sa_key_broken=key_state == ycwatch.KEY_BROKEN,
         sa_key_id=key["id"] if key else None,
         sa_id=key["service_account_id"] if key else None,
         bot_ready=bool(await subwatch.bot_token(db))

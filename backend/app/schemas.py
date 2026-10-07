@@ -601,6 +601,7 @@ class YcwatchConfigOut(BaseModel):
     notify: bool = True
     chat_id: str = ""
     sa_key_set: bool = False
+    sa_key_broken: bool = False   # ключ в базе есть, но не расшифровывается
     # Не секрет: id ключа и СА видны в консоли — по ним понятно, какой ключ стоит.
     sa_key_id: str | None = None
     sa_id: str | None = None

@@ -68,6 +68,10 @@ FAIL_STREAK = 3
 BURN_WINDOW = timedelta(hours=72)
 BURN_MIN_SPAN = timedelta(hours=6)
 
+KEY_MISSING = "missing"  # ключа нет: следилку не настроили, молчим
+KEY_BROKEN = "broken"    # ключ есть, но не читается: мы ослепли, это тревога
+KEY_OK = "ok"
+
 OK = "ok"
 LOW = "low"            # денег меньше порога, но всё работает
 CRITICAL = "critical"  # баланс ≤ 0, аккаунт неактивен или ВМ не RUNNING
@@ -323,14 +327,26 @@ async def get_state(db: AsyncSession) -> dict:
          "checked_at": None, "reasons": []})
 
 
-async def get_key(db: AsyncSession) -> dict | None:
+async def read_key(db: AsyncSession) -> tuple[str, dict | None]:
+    """(состояние ключа, сам ключ).
+
+    «Ключа нет» и «ключ не читается» — разные вещи, и путать их нельзя: без
+    ключа следилку просто не настроили, а нечитаемый ключ (сменился ключ
+    шифрования, побилась строка) — авария, при которой мы слепнем. Поэтому
+    второй случай доходит до опроса и поднимает тревогу «облако не отвечает».
+    """
     row = await db.get(AppSetting, SA_KEY)
     if not row or not row.value_enc:
-        return None
+        return KEY_MISSING, None
     try:
-        return json.loads(decrypt_secret(row.value_enc))
+        return KEY_OK, json.loads(decrypt_secret(row.value_enc))
     except Exception:  # noqa: BLE001 — сменился ключ шифрования
-        return None
+        log.warning("ycwatch: ключ СА в базе не расшифровывается")
+        return KEY_BROKEN, None
+
+
+async def get_key(db: AsyncSession) -> dict | None:
+    return (await read_key(db))[1]
 
 
 async def set_key(db: AsyncSession, raw: str | None) -> dict | None:
@@ -471,8 +487,8 @@ def step(state: dict, cfg: dict, obs: Observation, now_dt: datetime) -> tuple[di
                          last_notified=now_dt.isoformat(), reasons=[obs.error or "?"])
             return state, BLIND, []
         if prev == BLIND:
-            state = _maybe_remind(state, cfg, BLIND, now_dt)
-            return state, BLIND if state.pop("remind", False) else None, []
+            state, again = _say_again(state, cfg, BLIND, now_dt)
+            return state, BLIND if again else None, []
         return state, None, []
 
     level, reasons = assess(cfg, obs)
@@ -485,9 +501,24 @@ def step(state: dict, cfg: dict, obs: Observation, now_dt: datetime) -> tuple[di
         state["last_notified"] = now_dt.isoformat()
         return state, level, reasons
     if level == OK:
+        # Всё хорошо и было хорошо: пересказывать нечего, даже если прошлое
+        # сообщение не ушло.
+        state["undelivered"] = False
         return state, None, reasons
+    state, again = _say_again(state, cfg, level, now_dt)
+    return state, level if again else None, reasons
+
+
+def _say_again(state: dict, cfg: dict, level: str, now_dt: datetime) -> tuple[dict, bool]:
+    """Повторить ли сообщение: прошлое не доставили — повторяем сразу, иначе ждём
+    напоминания. Без первого правила тревога, не ушедшая в телеграм, терялась бы
+    до следующего напоминания, а при выключенных напоминаниях — навсегда."""
+    if state.get("undelivered"):
+        state = dict(state)
+        state["last_notified"] = now_dt.isoformat()
+        return state, True
     state = _maybe_remind(state, cfg, level, now_dt)
-    return state, level if state.pop("remind", False) else None, reasons
+    return state, bool(state.pop("remind", False))
 
 
 def _maybe_remind(state: dict, cfg: dict, level: str, now_dt: datetime) -> dict:
@@ -505,9 +536,10 @@ def _maybe_remind(state: dict, cfg: dict, level: str, now_dt: datetime) -> dict:
 async def check_once(db: AsyncSession, cfg: dict | None = None) -> dict:
     """Опросить облако, записать результат и, если надо, сказать в телеграм."""
     cfg = cfg or await get_config(db)
-    key = await get_key(db)
+    key_state, key = await read_key(db)
     if key is None:
-        obs = Observation(ok=False, error="ключ СА не задан")
+        obs = Observation(ok=False, error="ключ СА не задан" if key_state == KEY_MISSING
+                          else "ключ СА в базе не читается — сменился ключ шифрования?")
     else:
         obs = await asyncio.to_thread(probe, key, cfg)
 
@@ -526,6 +558,9 @@ async def check_once(db: AsyncSession, cfg: dict | None = None) -> dict:
         text = _text(say, prev_state.get("level"), cfg, obs, reasons, rate, days,
                      int(state.get("fails") or 0))
         notified = await _notify(db, cfg, text)
+        # Не доставили — помним об этом: иначе отметка «сказали» заткнёт следующий
+        # заход, а при выключенных напоминаниях тревога потеряется совсем.
+        state["undelivered"] = bool(notified)
 
     await subwatch._save_json(db, STATE_KEY, state)
     await db.commit()
@@ -567,7 +602,9 @@ async def run_ycwatch() -> None:
         try:
             async with SessionLocal() as db:
                 cfg = await get_config(db)
-                if cfg.get("enabled") and await get_key(db) is not None \
+                # Ключа нет — молчим; ключ есть, но не читается — идём в опрос,
+                # чтобы поднялась тревога, а не наступила тишина.
+                if cfg.get("enabled") and (await read_key(db))[0] != KEY_MISSING \
                         and _due(await get_state(db), cfg, _now()):
                     out = await check_once(db, cfg)
                     obs = out["obs"]

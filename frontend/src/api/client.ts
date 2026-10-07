@@ -858,6 +858,8 @@ export type YcwatchConfig = {
   notify: boolean;
   chat_id: string;
   sa_key_set: boolean;
+  /** Ключ в базе есть, но не расшифровывается — следилка ослепла. */
+  sa_key_broken: boolean;
   sa_key_id: string | null;
   sa_id: string | null;
   bot_ready: boolean;
@@ -880,7 +882,9 @@ export type YcwatchStatus = {
 };
 
 export type YcwatchUpdate = Partial<
-  Omit<YcwatchConfig, "sa_key_set" | "sa_key_id" | "sa_id" | "bot_ready"> & { sa_key: string }
+  Omit<YcwatchConfig, "sa_key_set" | "sa_key_broken" | "sa_key_id" | "sa_id" | "bot_ready"> & {
+    sa_key: string;
+  }
 >;
 
 export type BackupFile = {

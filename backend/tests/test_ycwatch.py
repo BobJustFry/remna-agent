@@ -107,6 +107,30 @@ class StepTests(unittest.TestCase):
         _, say, _ = ycwatch.step(state, CFG, fail(), T0 + timedelta(hours=25))
         self.assertEqual(say, BLIND)
 
+    def test_undelivered_alert_repeats_next_check(self) -> None:
+        # Напоминания выключены: без отметки «не доставили» тревога пропала бы совсем.
+        cfg = dict(CFG, remind_min=0)
+        state, say, _ = ycwatch.step(empty_state(), cfg, obs(balance=-1), T0)
+        self.assertEqual(say, CRITICAL)
+        state["undelivered"] = True            # телеграм не принял
+        state, say, _ = ycwatch.step(state, cfg, obs(balance=-2), T0 + timedelta(hours=1))
+        self.assertEqual(say, CRITICAL)
+        state["undelivered"] = False           # на этот раз ушло
+        state, say, _ = ycwatch.step(state, cfg, obs(balance=-3), T0 + timedelta(hours=2))
+        self.assertIsNone(say)
+
+    def test_undelivered_blind_repeats(self) -> None:
+        state = dict(empty_state(), level=BLIND, fails=5,
+                     last_notified=T0.isoformat(), undelivered=True)
+        _, say, _ = ycwatch.step(state, CFG, fail(), T0 + timedelta(minutes=1))
+        self.assertEqual(say, BLIND)
+
+    def test_recovery_clears_undelivered(self) -> None:
+        state = dict(empty_state(), level=OK, undelivered=True)
+        state, say, _ = ycwatch.step(state, CFG, obs(), T0)
+        self.assertIsNone(say)
+        self.assertFalse(state["undelivered"])
+
     def test_single_hiccup_keeps_level(self) -> None:
         state, _, _ = ycwatch.step(empty_state(), CFG, obs(balance=-1), T0)
         state, say, _ = ycwatch.step(state, CFG, fail(), T0 + timedelta(minutes=10))
