@@ -302,3 +302,26 @@ class YcCheck(Base):
     vms: Mapped[list | None] = mapped_column(JSON, nullable=True)
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SharingActivity(Base):
+    """Суточный профиль активности: был ли человек онлайн в этот час.
+
+    Нужен одному признаку — ночной паузе. У человека в сутках есть провал на
+    сон, у раздачи на десяток людей его нет, и никакой счёт адресов этого не
+    покажет: ферма может сидеть с одного адреса круглосуточно.
+
+    Строка с ``user_id = 0`` — служебная: в ней лежит, сколько сканов вообще
+    случилось в этом часе. Без неё дробь «был онлайн / могли увидеть» не
+    посчитать: офлайн-пользователь строки не заводит, а рагент перезапускается
+    и часы бывают неполными.
+    """
+
+    __tablename__ = "sharing_activity"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Начало часа в UTC.
+    bucket: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), primary_key=True, index=True
+    )
+    seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

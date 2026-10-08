@@ -59,6 +59,9 @@ export function Sidebar({ username, onLogout, open, onClose }: Props) {
             <NavItem to="/ai-access" onNavigate={onClose}>
               Доступность приложений
             </NavItem>
+            <NavItem to="/sharing" onNavigate={onClose}>
+              Шаринг
+            </NavItem>
           </NavSection>
 
           <NavSection title="Управление">

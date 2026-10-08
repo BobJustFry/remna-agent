@@ -28,7 +28,9 @@ _TTL = 24 * 3600.0
 _NEG_TTL = 600.0
 _TIMEOUT = 2.0
 _MAX_ENTRIES = 20000
-_cache: dict[str, tuple[float, str]] = {}
+# ip -> (когда, ключ сети, страна регистрации). Страна берётся из того же
+# ответа Cymru ("8359 | 91.78.72.0/21 | RU | …"), отдельного запроса не нужно.
+_cache: dict[str, tuple[float, str, str]] = {}
 _resolvers: list[str] | None = None
 
 
@@ -110,7 +112,7 @@ def _txt_query(name: str) -> str | None:
     return None
 
 
-def _query(ip: str) -> str | None:
+def _query(ip: str) -> tuple[str, str] | None:
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
@@ -122,25 +124,48 @@ def _query(ip: str) -> str | None:
     if not text or "|" not in text:
         return None
     # "8359 | 91.78.72.0/21 | RU | ripencc | 2006-08-21"
-    head = text.split("|")[0].strip().split()
-    return f"as:{head[0]}" if head and head[0].isdigit() else None
+    fields = [f.strip() for f in text.split("|")]
+    head = fields[0].split()
+    if not head or not head[0].isdigit():
+        return None
+    country = fields[2].upper() if len(fields) > 2 and len(fields[2]) == 2 else ""
+    return f"as:{head[0]}", country
+
+
+def _lookup(ip: str) -> tuple[str, str]:
+    now = time.time()
+    hit = _cache.get(ip)
+    if hit and now - hit[0] < (_TTL if hit[1].startswith("as:") else _NEG_TTL):
+        return hit[1], hit[2]
+    found = _query(ip)
+    key, country = found if found else (_slash16(ip), "")
+    if len(_cache) > _MAX_ENTRIES:
+        _cache.clear()
+    _cache[ip] = (now, key, country)
+    return key, country
 
 
 def network_of(ip: str) -> str:
     """Stable grouping key for an address: its operator when known, else its /16."""
-    now = time.time()
-    hit = _cache.get(ip)
-    if hit and now - hit[0] < (_TTL if hit[1].startswith("as:") else _NEG_TTL):
-        return hit[1]
-    key = _query(ip) or _slash16(ip)
-    if len(_cache) > _MAX_ENTRIES:
-        _cache.clear()
-    _cache[ip] = (now, key)
-    return key
+    return _lookup(ip)[0]
+
+
+def country_of(ip: str) -> str:
+    """Страна регистрации сети, двумя буквами; пусто — не узнали.
+
+    Это НЕ геолокация абонента: регистратор пишет страну владельца сети, а не
+    место, где включили телефон. Для «невозможного перемещения» годится только
+    как слабый признак — см. sharing_score.
+    """
+    return _lookup(ip)[1]
 
 
 def networks_of(ips) -> set[str]:
     return {network_of(ip) for ip in ips if ip}
+
+
+def countries_of(ips) -> set[str]:
+    return {c for c in (country_of(ip) for ip in ips if ip) if c}
 
 
 def cache_size() -> int:

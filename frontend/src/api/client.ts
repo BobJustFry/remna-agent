@@ -8,6 +8,8 @@ import type {
   NodeItem,
   NodesMetricsResponse,
   OnlineMap,
+  SharingConfig,
+  SharingConfigUpdate,
   SharingDossier,
   SharingStatus,
   SshCheckResult,
@@ -118,6 +120,14 @@ export const api = {
     request<SharingStatus>("/api/sharing/scan", { method: "POST" }),
   sharingDossier: (nodeId: string) =>
     request<SharingDossier>(`/api/sharing/nodes/${nodeId}/dossier`),
+  sharingUserDossier: (userId: number) =>
+    request<SharingDossier>(`/api/sharing/users/${userId}/dossier`),
+  sharingSettings: () => request<SharingConfig>("/api/sharing/settings"),
+  sharingUpdate: (body: SharingConfigUpdate) =>
+    request<SharingConfig>("/api/sharing/settings", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   sshCheck: (id: string) =>
     request<SshCheckResult>(`/api/nodes/${id}/ssh-check`, { method: "POST" }),
   rebootNode: (id: string) =>

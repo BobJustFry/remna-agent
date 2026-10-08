@@ -160,6 +160,12 @@ export type SshCheckResult = {
   message: string;
 };
 
+export type SharingPart = {
+  key: string;
+  points: number;
+  why: string;
+};
+
 export type SharingUserHit = {
   user_id: number;
   username: string;
@@ -172,6 +178,17 @@ export type SharingUserHit = {
   ips_on_node: number;
   reasons: string[];
   rw_nodes: string[];
+  score: number;
+  level: "green" | "amber" | "red";
+  device_limit: number;
+  unlimited: boolean;
+  parts: SharingPart[];
+  countries: string[];
+  platforms: string[];
+  hwid_active: number | null;
+  hwid_total: number | null;
+  night_busy_pct: number | null;
+  traffic_ratio: number | null;
 };
 
 export type SharingNodePeers = {
@@ -185,6 +202,7 @@ export type SharingStatus = {
   scanning: boolean;
   online_users: number;
   flagged: number;
+  suspects: SharingUserHit[];
   by_agent_id: Record<string, SharingUserHit[]>;
   peers_by_agent_id?: Record<string, SharingNodePeers>;
   thresholds: Record<string, number>;
@@ -194,3 +212,44 @@ export type SharingDossier = {
   filename: string;
   text: string;
 };
+
+export type SharingConfig = {
+  enabled: boolean;
+  red: number;
+  amber: number;
+  red_streak: number;
+  green_streak: number;
+  fallback_device_limit: number;
+  unlimited_as: number;
+  ip_per_device: number;
+  ip_slack_5m: number;
+  ip_slack_15m: number;
+  conc_ip_per_device: number;
+  conc_ip_slack: number;
+  net_per_device: number;
+  net_slack: number;
+  w_conc_ips: number;
+  w_conc_nets: number;
+  w_ips_5m: number;
+  w_ips_15m: number;
+  w_platforms: number;
+  w_travel: number;
+  w_hwid: number;
+  w_night: number;
+  w_traffic: number;
+  traffic_median_mult: number;
+  night_window_h: number;
+  night_min_days: number;
+  night_quiet_pct: number;
+  night_full_pct: number;
+  night_keep_days: number;
+  hwid_active_min: number;
+  users_refresh_min: number;
+  max_candidates: number;
+  notify: boolean;
+  chat_id: string;
+  remind_hours: number;
+  bot_ready: boolean;
+};
+
+export type SharingConfigUpdate = Partial<Omit<SharingConfig, "bot_ready" | "fallback_device_limit">>;

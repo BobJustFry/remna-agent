@@ -10,6 +10,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { NodesPage } from "./pages/NodesPage";
 import { ScriptsPage } from "./pages/ScriptsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { SharingPage } from "./pages/SharingPage";
 
 type AuthState = "loading" | "guest" | "user";
 
@@ -69,6 +70,7 @@ export default function App() {
           <Route path="settings" element={<SettingsPage />} />
           <Route path="hostings" element={<HostingsPage />} />
           <Route path="ai-access" element={<AiAccessPage />} />
+          <Route path="sharing" element={<SharingPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

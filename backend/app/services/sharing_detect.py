@@ -1,7 +1,12 @@
-"""Детектор шаринга по уникальным клиентским IP Xray (GetStatsOnlineIpList).
+"""Детектор шаринга по данным Xray с нод (GetStatsOnlineIpList через API панели).
 
 Не путать с ss ESTAB / proxy_peers: xHTTP держит пачку TCP на один IP.
-Порог — разные исходные адреса одного UUID, не число сокетов.
+Считаем разные исходные адреса одного пользователя, а не число сокетов.
+
+Вердикт — не порог, а оценка: веса и нормы живут в sharing_score, норма
+считается от лимита устройств пользователя. Здесь только сбор признаков:
+адреса и операторы с нод, карточки пользователей, HWID кандидатов. В панель
+ходим только читать.
 """
 from __future__ import annotations
 
@@ -14,8 +19,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.services import asn_lookup
+from app.services import asn_lookup, sharing_score
 from app.services.remnawave_api import RemnawaveApiError, rw_api, rw_nodes
+from app.services.sharing_score import Features, Verdict
 
 log = logging.getLogger("remna.sharing")
 
@@ -23,15 +29,11 @@ log = logging.getLogger("remna.sharing")
 WIN_5 = timedelta(minutes=5)
 WIN_15 = timedelta(minutes=15)
 
-# Один человек: 1 IP, реже 2–3 (LTE+Wi‑Fi / CGNAT).
-# 8+ разных IP за 5 мин — ферма.
+# Старые жёсткие пороги. Вердикт их больше не выносит, но они остались как
+# справочная «норма при общем лимите 3» — её показывает интерфейс в шапке и
+# по ней читаются старые записи в журнале.
 BAN_IPS_5M = 8
 BAN_IPS_15M = 12
-
-# Операторы, а не /16. Российские провайдеры держат один пул абонентов в
-# нескольких /16 (МТС — 91.78.x и 91.79.x, Ростелеком — 85.112.x и 80.234.x),
-# поэтому счёт по маске штрафовал человека с мобильным интернетом за то, что
-# у него меняется адрес. Порог применяется к ОДНОВРЕМЕННО активным операторам.
 BAN_NETS_CONCURRENT = 5
 
 # «Одновременно» — в пределах этого окна вокруг любого наблюдения. Роуминг по
@@ -54,6 +56,7 @@ _snapshot: dict[str, Any] = {
     "scanning": False,
     "online_users": 0,
     "flagged": 0,
+    "suspects": [],
     "by_agent_id": {},
     "peers_by_agent_id": {},
     "thresholds": {
@@ -72,6 +75,7 @@ def snapshot() -> dict[str, Any]:
             "scanning": _snapshot.get("scanning"),
             "online_users": _snapshot.get("online_users"),
             "flagged": _snapshot.get("flagged"),
+            "suspects": list(_snapshot.get("suspects") or []),
             "by_agent_id": dict(_snapshot.get("by_agent_id") or {}),
             "peers_by_agent_id": dict(_snapshot.get("peers_by_agent_id") or {}),
             "thresholds": dict(_snapshot.get("thresholds") or {}),
@@ -205,20 +209,6 @@ def _poll_jobs(jobs: list[tuple[str, str, str]]) -> dict[str, dict]:
     return results
 
 
-def _reasons(ips_5m: int, conc_nets: int, ips_15m: int) -> list[str]:
-    why = []
-    if ips_5m >= BAN_IPS_5M:
-        why.append(f"уникальных клиентских IP за 5 мин: {ips_5m} (порог {BAN_IPS_5M})")
-    if conc_nets >= BAN_NETS_CONCURRENT:
-        why.append(
-            f"операторов одновременно: {conc_nets} (порог {BAN_NETS_CONCURRENT}) — "
-            "разные сети в одну минуту, не смена адреса"
-        )
-    if ips_15m >= BAN_IPS_15M:
-        why.append(f"уникальных IP за 15 мин: {ips_15m} (порог {BAN_IPS_15M})")
-    return why
-
-
 def _unwrap_user(payload: Any) -> dict:
     if not isinstance(payload, dict) or payload.get("_error"):
         return {}
@@ -227,6 +217,97 @@ def _unwrap_user(payload: Any) -> dict:
     inner = payload.get("user") or payload.get("response")
     return inner if isinstance(inner, dict) else {}
 
+
+# ── карточки пользователей: лимит устройств и трафик ─────────────────────────
+#
+# Нормы считаются от лимита устройств, значит лимит нужен для КАЖДОГО онлайна,
+# а не только для попавшихся. Спрашивать карточку на каждого в каждом скане —
+# это 300 запросов раз в две минуты, поэтому весь список читается целиком
+# страницами и держится в памяти: 4700 пользователей забираются за восемь
+# секунд, этого хватает на полчаса.
+
+_users: dict[str, Any] = {"at": 0.0, "by_id": {}, "median": None,
+                          "fallback_limit": None, "error": None}
+
+
+def _fetch_fallback_limit() -> int | None:
+    ss = _try_api("/api/subscription-settings")
+    if not isinstance(ss, dict) or ss.get("_error"):
+        return None
+    hw = ss.get("hwidSettings")
+    if not isinstance(hw, dict):
+        return None
+    try:
+        return int(hw.get("fallbackDeviceLimit"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _median(values: list[int]) -> int | None:
+    if not values:
+        return None
+    values = sorted(values)
+    mid = len(values) // 2
+    if len(values) % 2:
+        return values[mid]
+    return (values[mid - 1] + values[mid]) // 2
+
+
+def refresh_users(cfg: dict, force: bool = False) -> dict:
+    """Перечитать карточки всех пользователей, если кэш протух. Только чтение."""
+    ttl = max(60.0, float(cfg.get("users_refresh_min") or 30) * 60)
+    if not force and _users["by_id"] and time.time() - _users["at"] < ttl:
+        return _users
+    by_id: dict[int, dict] = {}
+    start, total, error = 0, 1, None
+    while start < total:
+        page = _try_api(f"/api/users?size=500&start={start}")
+        if not isinstance(page, dict) or page.get("_error"):
+            error = str(page.get("_error") if isinstance(page, dict) else page)
+            break
+        rows = page.get("users") or []
+        try:
+            total = int(page.get("total") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        for u in rows:
+            if not isinstance(u, dict):
+                continue
+            try:
+                uid = int(u.get("id"))
+            except (TypeError, ValueError):
+                continue
+            ut = u.get("userTraffic") or {}
+            try:
+                used = int(ut.get("usedTrafficBytes") or 0)
+            except (TypeError, ValueError):
+                used = 0
+            by_id[uid] = {
+                "username": str(u.get("username") or ""),
+                "limit": u.get("hwidDeviceLimit"),
+                "used": used,
+                "status": str(u.get("status") or ""),
+                "tag": u.get("tag"),
+            }
+        if not rows:
+            break
+        start += len(rows)
+    if by_id:
+        used = [v["used"] for v in by_id.values() if v["status"] == "ACTIVE" and v["used"] > 0]
+        _users.update(at=time.time(), by_id=by_id, median=_median(used), error=error,
+                      fallback_limit=_fetch_fallback_limit())
+        log.info("sharing: карточек пользователей %s, медиана трафика %s",
+                 len(by_id), _tb(_users["median"]))
+    else:
+        _users["error"] = error or "панель не отдала список пользователей"
+    return _users
+
+
+def users_cache() -> dict:
+    return _users
+
+
+# ── сбор признаков ───────────────────────────────────────────────────────────
 
 @dataclass
 class _UserStat:
@@ -237,14 +318,33 @@ class _UserStat:
     s16_5m: int = 0          # операторов за 5 мин (имя оставлено для совместимости)
     conc_ips: int = 0        # максимум одновременных IP
     conc_nets: int = 0       # максимум одновременных операторов
+    conc_countries: list[str] = field(default_factory=list)
     own_ips: int = 0         # отсеяно адресов собственных нод
     nodes: list[str] = field(default_factory=list)
+    # Панель держит пользователя в списке онлайна и через сутки после последнего
+    # пакета: из 323 «онлайн» у 80 метка старше шести часов. Для суточного
+    # профиля такой человек онлайном не считается, иначе провал на сон исчезнет
+    # у всех разом.
+    fresh: bool = False
     reasons: list[str] = field(default_factory=list)
     username: str = ""
+    verdict: Verdict | None = None
+    features: Features | None = None
 
 
 _flagged_stats: dict[int, _UserStat] = {}
+# Докуда дошёл обход парка на HWID: продолжаем с этого места в следующем скане.
+_sweep: dict[str, int] = {"at": 0}
 
+
+def _rotate(items: list, take: int) -> list:
+    """Следующий кусок круга. Пустой список и нулевой кусок — ничего не берём."""
+    if take <= 0 or not items:
+        return []
+    start = _sweep["at"] % len(items)
+    _sweep["at"] = (start + take) % len(items)
+    doubled = items + items
+    return doubled[start:start + min(take, len(items))]
 
 
 def _networks(ips) -> set[str]:
@@ -256,8 +356,16 @@ def _networks(ips) -> set[str]:
         return {n for n in (_slash16(ip) for ip in ips) if n}
 
 
-def _concurrency(rows: list[dict]) -> tuple[int, int]:
-    """Максимум адресов и операторов, живших в одном окне CONCURRENCY_WINDOW.
+def _countries(ips) -> set[str]:
+    try:
+        return asn_lookup.countries_of(ips)
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _concurrency(rows: list[dict]) -> tuple[int, int, list[str]]:
+    """Максимум адресов и операторов, живших в одном окне CONCURRENCY_WINDOW,
+    и страны регистрации сетей самой «широкой» такой группы.
 
     Человек, который переезжает с вышки на вышку, набирает адреса
     последовательно — в любом окне их один-два. Ферма даёт пачку сразу.
@@ -268,15 +376,56 @@ def _concurrency(rows: list[dict]) -> tuple[int, int]:
         if ts:
             stamped.append((r["ip"], ts))
     if not stamped:
-        return 0, 0
+        return 0, 0, []
     window = CONCURRENCY_WINDOW.total_seconds()
     best_ips = best_nets = 0
+    best_countries: set[str] = set()
     for _, anchor in stamped:
         group = {ip for ip, ts in stamped if abs((ts - anchor).total_seconds()) <= window}
         if len(group) > best_ips:
             best_ips = len(group)
-            best_nets = max(best_nets, len(_networks(group)))
-    return best_ips, best_nets
+        nets = len(_networks(group))
+        if nets > best_nets:
+            best_nets = nets
+            best_countries = _countries(group)
+    return best_ips, best_nets, sorted(best_countries)
+
+
+def _platform(dev: dict) -> str:
+    """Платформа устройства, как её назвало приложение. Пусто — не представилось."""
+    name = str(dev.get("platform") or "").strip()
+    if name:
+        return name
+    model = str(dev.get("deviceModel") or "").strip()
+    return model or ""
+
+
+def hwid_features(user_id: int, cfg: dict, now: datetime | None = None) -> tuple[list[str], int, int]:
+    """(платформы, активных HWID, всего HWID) по /api/hwid/devices/{id}.
+
+    Активные — те, чей updatedAt попал в окно hwid_active_min. Переустановка
+    даёт новую запись, но старая перестаёт обновляться, поэтому в окно они
+    вдвоём не попадут; два живых устройства — попадут.
+    """
+    now = now or _now()
+    payload = _try_api(f"/api/hwid/devices/{user_id}")
+    if not isinstance(payload, dict) or payload.get("_error"):
+        return [], 0, 0
+    devices = payload.get("devices") or []
+    window = timedelta(minutes=max(5, int(cfg.get("hwid_active_min") or 60)))
+    platforms: set[str] = set()
+    active = 0
+    for d in devices:
+        if not isinstance(d, dict):
+            continue
+        ts = _parse_ts(d.get("updatedAt"))
+        if not ts or now - ts > window:
+            continue
+        active += 1
+        name = _platform(d)
+        if name:
+            platforms.add(name)
+    return sorted(platforms), active, len(devices)
 
 
 def _collect_stats(
@@ -332,20 +481,90 @@ def _collect_stats(
         st.ips_5m = len(i5)
         st.ips_15m = len(i15)
         st.s16_5m = len(_networks(i5))
-        st.conc_ips, st.conc_nets = _concurrency(st.rows)
+        st.conc_ips, st.conc_nets, st.conc_countries = _concurrency(st.rows)
+        st.fresh = bool(r15)
         st.nodes = sorted({r["node"] for r in st.rows})
-        st.reasons = _reasons(st.ips_5m, st.conc_nets, st.ips_15m)
     return by_user
 
 
-def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
-    """agent_nodes: (agent_id, name, host). Sync — вызывать из to_thread."""
+def _features(st: _UserStat, cfg: dict, card: dict, median: int | None,
+              profile: tuple[float, int] | None) -> Features:
+    limit = card.get("limit") if card else None
+    ratio = None
+    if median and median > 0 and card and card.get("used"):
+        ratio = round(card["used"] / median, 2)
+    night_pct, night_days = profile if profile else (None, 0)
+    return Features(
+        user_id=st.uid,
+        username=st.username or (card.get("username") if card else "") or "",
+        raw_limit=limit,
+        ips_5m=st.ips_5m,
+        ips_15m=st.ips_15m,
+        conc_ips=st.conc_ips,
+        conc_nets=st.conc_nets,
+        conc_countries=st.conc_countries,
+        night_busy_pct=night_pct,
+        night_days=night_days,
+        traffic_ratio=ratio,
+    )
+
+
+def _hit(st: _UserStat, on_node: int = 0) -> dict:
+    """Строка для интерфейса. Старые поля на месте — вид нод их уже читает."""
+    v = st.verdict
+    f = st.features
+    return {
+        "user_id": st.uid,
+        "username": st.username,
+        "ips_5m": st.ips_5m,
+        "ips_15m": st.ips_15m,
+        "s16_5m": st.s16_5m,
+        "conc_ips": st.conc_ips,
+        "conc_nets": st.conc_nets,
+        "own_ips": st.own_ips,
+        "ips_on_node": on_node,
+        "reasons": st.reasons,
+        "rw_nodes": st.nodes,
+        "score": v.score if v else 0,
+        "level": v.level if v else sharing_score.GREEN,
+        "device_limit": v.device_limit if v else 0,
+        "unlimited": bool(v.unlimited) if v else False,
+        "parts": [{"key": p.key, "points": p.points, "why": p.why} for p in (v.parts if v else [])],
+        "countries": list(st.conc_countries),
+        "platforms": list(f.platforms or []) if f else [],
+        "hwid_active": (f.hwid_active if f else None),
+        "hwid_total": (f.hwid_total if f else None),
+        "night_busy_pct": (f.night_busy_pct if f else None),
+        "traffic_ratio": (f.traffic_ratio if f else None),
+    }
+
+
+def scan_once(
+    agent_nodes: list[tuple[str, str, str]],
+    cfg: dict | None = None,
+    profiles: dict[int, tuple[float, int]] | None = None,
+) -> dict[str, Any]:
+    """agent_nodes: (agent_id, name, host). Sync — вызывать из to_thread.
+
+    cfg — настройки оценки (sharing_score.DEFAULTS, перекрытые из app_settings),
+    profiles — {user_id: (занятость самого тихого окна суток, суток наблюдений)}.
+    """
+    cfg = {**sharing_score.DEFAULTS, **(cfg or {})}
+    profiles = profiles or {}
     try:
         rw = rw_nodes()
     except RemnawaveApiError as exc:
         err = str(exc)
         mark_error(err)
         return snapshot()
+
+    cache = refresh_users(cfg)
+    if cache.get("fallback_limit"):
+        # Общий лимит берём из панели, а не из настроек: он там и живёт.
+        cfg = {**cfg, "fallback_device_limit": cache["fallback_limit"]}
+    cards: dict[int, dict] = cache.get("by_id") or {}
+    median: int | None = cache.get("median")
+
     jobs: list[tuple[str, str, str]] = []
     addr_by_uuid: dict[str, str] = {}
     for n in rw:
@@ -372,20 +591,62 @@ def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
     own_ips = {a for a in addr_by_uuid.values() if a}
     own_ips.update(h for _, _, h in agent_nodes if h)
     stats = _collect_stats(node_results, own_ips)
-    flagged: list[_UserStat] = []
+
+    # Служебные пользователи-хопы шарингом не считаются: это наши же туннели.
+    for uid in list(stats):
+        name = str((cards.get(uid) or {}).get("username") or "")
+        if name.lower().startswith(SKIP_PREFIX):
+            stats.pop(uid, None)
+
+    # Первый проход — по тому, что видно без лишних запросов в панель.
     for st in stats.values():
-        if not st.reasons:
-            continue
-        card = _unwrap_user(_try_api(f"/api/users/{st.uid}"))
-        name = (card.get("username") or "").lower()
-        if name.startswith(SKIP_PREFIX):
-            continue
+        card = cards.get(st.uid) or {}
         st.username = str(card.get("username") or "")
-        flagged.append(st)
+        st.features = _features(st, cfg, card, median, profiles.get(st.uid))
+        st.verdict = sharing_score.score(cfg, st.features)
+
+    # Второй проход — HWID. Платформы и живые устройства стоят запроса на
+    # человека, поэтому за скан спрашиваем не больше max_candidates.
+    #
+    # Сначала те, кто уже набрал половину жёлтой зоны. Но одними ими
+    # ограничиться нельзя: в чистом парке по адресам никто столько не набирает,
+    # и признак «три платформы при лимите 1» не сработал бы никогда. Поэтому
+    # остаток места отдаётся всем остальным по кругу: при 330 онлайн и 60 местах
+    # каждый проверяется примерно раз в десять минут.
+    limit_n = max(0, int(cfg.get("max_candidates") or 60))
+    floor = float(cfg.get("amber") or 35) / 2
+    hot = sorted(
+        (st for st in stats.values() if st.verdict and st.verdict.score >= floor),
+        key=lambda s: -(s.verdict.score if s.verdict else 0),
+    )[:limit_n]
+    hot_ids = {st.uid for st in hot}
+    rest = sorted((st for st in stats.values() if st.fresh and st.uid not in hot_ids),
+                  key=lambda s: s.uid)
+    candidates = hot + _rotate(rest, max(0, limit_n - len(hot)))
+    now_hwid = _now()
+    for st in candidates:
+        platforms, active, total = hwid_features(st.uid, cfg, now_hwid)
+        if not total:
+            continue
+        st.features.platforms = platforms
+        st.features.hwid_active = active
+        st.features.hwid_total = total
+        st.verdict = sharing_score.score(cfg, st.features)
+
+    for st in stats.values():
+        st.reasons = st.verdict.reasons if st.verdict else []
+
+    red = [st for st in stats.values()
+           if st.verdict and st.verdict.level == sharing_score.RED]
+    suspects = sorted(
+        (st for st in stats.values()
+         if st.verdict and st.verdict.level in (sharing_score.RED, sharing_score.AMBER)),
+        key=lambda s: -(s.verdict.score if s.verdict else 0),
+    )
 
     with _lock:
         _flagged_stats.clear()
-        _flagged_stats.update({st.uid: st for st in flagged})
+        _flagged_stats.update({st.uid: st for st in suspects})
 
     host_to_agent: dict[str, str] = {}
     name_to_agent: dict[str, str] = {}
@@ -429,8 +690,10 @@ def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
         for aid, ips in peer_ips.items()
     }
 
+    # На ноде показываем только красных: жёлтый — повод посмотреть на странице
+    # шаринга, а не значок тревоги у каждой второй ноды.
     by_agent: dict[str, list[dict]] = defaultdict(list)
-    for st in flagged:
+    for st in red:
         seen_agents: set[str] = set()
         for r in st.rows:
             ts = _parse_ts(r["lastSeen"])
@@ -445,32 +708,24 @@ def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
                 for x in st.rows
                 if _norm_host(str(x.get("address") or "")) == _norm_host(str(r.get("address") or ""))
             }
-            by_agent[aid].append({
-                "user_id": st.uid,
-                "username": st.username,
-                "ips_5m": st.ips_5m,
-                "ips_15m": st.ips_15m,
-                "s16_5m": st.s16_5m,
-                "conc_ips": st.conc_ips,
-                "conc_nets": st.conc_nets,
-                "own_ips": st.own_ips,
-                "ips_on_node": len(on_node),
-                "reasons": st.reasons,
-                "rw_nodes": st.nodes,
-            })
+            by_agent[aid].append(_hit(st, len(on_node)))
 
     out = {
         "scanned_at": _now().isoformat(),
         "error": None,
         "scanning": False,
         "online_users": len(stats),
-        "flagged": len(flagged),
+        "flagged": len(red),
+        "suspects": [_hit(st) for st in suspects],
         "by_agent_id": dict(by_agent),
         "peers_by_agent_id": peers_by_agent,
         "thresholds": {
             "ips_5m": BAN_IPS_5M,
             "nets_concurrent": BAN_NETS_CONCURRENT,
             "ips_15m": BAN_IPS_15M,
+            "red": int(cfg.get("red") or 0),
+            "amber": int(cfg.get("amber") or 0),
+            "fallback_device_limit": int(cfg.get("fallback_device_limit") or 0),
         },
     }
     with _lock:
@@ -481,15 +736,28 @@ def scan_once(agent_nodes: list[tuple[str, str, str]]) -> dict[str, Any]:
         if not _agent_id(str(p.get("_address") or ""), str(p.get("_nodeName") or ""))
     ]
     log.info(
-        "sharing scan: online=%s flagged=%s share_nodes=%s peer_nodes=%s unmatched=%s",
+        "sharing scan: online=%s red=%s amber=%s share_nodes=%s peer_nodes=%s unmatched=%s",
         len(stats),
-        len(flagged),
+        len(red),
+        len(suspects) - len(red),
         len(by_agent),
         len(peers_by_agent),
         unmatched[:12],
     )
-    return out
+    # online_ids наружу, но не в снимок: по ним копится суточный профиль.
+    return {**out, "online_ids": sorted(st.uid for st in stats.values() if st.fresh),
+            "levels": {st.uid: (st.verdict.level if st.verdict else sharing_score.GREEN,
+                                st.verdict.score if st.verdict else 0,
+                                st.username)
+                       for st in suspects}}
 
+
+def verdicts() -> dict[int, _UserStat]:
+    with _lock:
+        return dict(_flagged_stats)
+
+
+# ── досье ────────────────────────────────────────────────────────────────────
 
 def _fmt_user_header(u: dict) -> list[str]:
     ut = u.get("userTraffic") or {}
@@ -533,23 +801,29 @@ def build_dossier(user_id: int) -> str:
     yc = sum(1 for ip in sub_ips if in_yandex_cloud(str(ip)))
 
     snap = snapshot()
-    hits = []
-    for users in (snap.get("by_agent_id") or {}).values():
-        for u in users:
-            if u.get("user_id") == user_id:
-                hits.append(u)
-    reasons = hits[0]["reasons"] if hits else []
-    ips_5m = hits[0]["ips_5m"] if hits else 0
-    ips_15m = hits[0]["ips_15m"] if hits else 0
-    s16_5m = hits[0]["s16_5m"] if hits else 0
-    conc_ips = hits[0].get("conc_ips", 0) if hits else 0
-    conc_nets = hits[0].get("conc_nets", 0) if hits else 0
-    own_ips = hits[0].get("own_ips", 0) if hits else 0
-    rw_nodes = hits[0].get("rw_nodes") if hits else []
+    hits = [u for u in (snap.get("suspects") or []) if u.get("user_id") == user_id]
+    if not hits:
+        for users in (snap.get("by_agent_id") or {}).values():
+            hits += [u for u in users if u.get("user_id") == user_id]
+    hit = hits[0] if hits else {}
+    reasons = hit.get("reasons") or []
+    ips_5m = hit.get("ips_5m", 0)
+    ips_15m = hit.get("ips_15m", 0)
+    s16_5m = hit.get("s16_5m", 0)
+    conc_ips = hit.get("conc_ips", 0)
+    conc_nets = hit.get("conc_nets", 0)
+    own_ips = hit.get("own_ips", 0)
+    rw_nodes_ = hit.get("rw_nodes") or []
     with _lock:
         st = _flagged_stats.get(user_id)
 
-    # Live IPs: one more by-user is not available; reuse last scan reasons.
+    score_value = hit.get("score", 0)
+    level = hit.get("level", sharing_score.GREEN)
+    verdict_line = {
+        sharing_score.RED: f"ШАРИНГ: да, оценка {score_value} из 100 — красная зона",
+        sharing_score.AMBER: f"ШАРИНГ: под вопросом, оценка {score_value} из 100 — жёлтая зона",
+    }.get(level, "ШАРИНГ: нет в последнем скане (карточка всё равно собрана)")
+
     lines = [
         f"# SHARING dossier  user {user_id}",
         f"# snapshot {_now().isoformat()}",
@@ -558,23 +832,44 @@ def build_dossier(user_id: int) -> str:
         *_fmt_user_header(card),
         "",
         "## Решение",
-        "ШАРИНГ: да" if reasons else "ШАРИНГ: нет в последнем скане (карточка всё равно собрана)",
+        verdict_line,
     ]
-    for w in reasons:
-        lines.append(f"- {w}")
+    if hit.get("device_limit"):
+        lines.append(
+            f"норма считалась от лимита устройств {hit['device_limit']}"
+            + (" (у пользователя безлимит)" if hit.get("unlimited") else "")
+        )
+    for p in hit.get("parts") or []:
+        lines.append(f"- +{p.get('points')}  {p.get('why')}")
+    if not hit.get("parts"):
+        for w in reasons:
+            lines.append(f"- {w}")
     lines += [
         "",
         "## Доказательства шаринга",
-        f"ноды: {', '.join(rw_nodes) if rw_nodes else '—'}",
+        f"ноды: {', '.join(rw_nodes_) if rw_nodes_ else '—'}",
         f"уникальных клиентских IP  5 мин: {ips_5m}",
         f"уникальных клиентских IP 15 мин: {ips_15m}",
         f"операторов за 5 мин: {s16_5m}  (один человек обычно 1–3)",
         f"ОДНОВРЕМЕННО адресов: {conc_ips}, операторов: {conc_nets}  "
         f"(окно {int(CONCURRENCY_WINDOW.total_seconds())} с — вот это и отличает "
         f"шаринг от смены адреса)",
+        f"страны регистрации сетей в окне: {', '.join(hit.get('countries') or []) or '—'}"
+        "  (регистрация сети, не геолокация — признак слабый)",
         f"отсеяно адресов собственных нод: {own_ips}",
-        f"HWID записей: {len(devices)}  лимит: {card.get('hwidDeviceLimit')}",
     ]
+    if hit.get("platforms"):
+        lines.append(f"платформы одновременно: {', '.join(hit['platforms'])}")
+    if hit.get("hwid_active") is not None:
+        lines.append(f"HWID активных сейчас: {hit['hwid_active']} из {hit.get('hwid_total')}")
+    if hit.get("night_busy_pct") is not None:
+        lines.append(
+            f"самое тихое окно суток: онлайн {hit['night_busy_pct']:.0f}% сканов "
+            "(у одного человека тут провал на сон)"
+        )
+    if hit.get("traffic_ratio") is not None:
+        lines.append(f"трафик к медиане парка: ×{hit['traffic_ratio']}")
+    lines.append(f"HWID записей: {len(devices)}  лимит: {card.get('hwidDeviceLimit')}")
     for d in devices:
         if not isinstance(d, dict):
             continue
@@ -584,9 +879,9 @@ def build_dossier(user_id: int) -> str:
             f"ua={d.get('userAgent')} ip={d.get('requestIp')} "
             f"updated={d.get('updatedAt')}"
         )
-    if len(devices) <= 1 and ips_5m >= BAN_IPS_5M:
+    if len(devices) <= 1 and conc_ips >= 4:
         lines.append(
-            "  HWID не бьётся с числом IP: либо клон x-hwid, либо лимит не смотрит туннель."
+            "  HWID не бьётся с числом адресов: либо клон x-hwid, либо лимит не смотрит туннель."
         )
     lines.append(f"запросов подписки в history: {len(recs)}, уникальных IP фетча: {len(sub_ips)}")
     lines.append(f"из них Yandex.Cloud: {yc}")
@@ -627,9 +922,10 @@ def build_dossier(user_id: int) -> str:
         lines.append("  (нет снимка сессий — дождитесь скана)")
     lines.append("")
     lines.append(
-        "Порог: уникальные IP Xray (вход на ноду), не TCP ss. "
-        f"Шаринг если IP за 5 мин ≥ {BAN_IPS_5M} ИЛИ операторов одновременно ≥ {BAN_NETS_CONCURRENT} "
-        f"ИЛИ IP за 15 мин ≥ {BAN_IPS_15M}."
+        "Вердикт — оценка 0..100: адреса и операторы одновременно, платформы и HWID, "
+        "ночная пауза и трафик; нормы считаются от лимита устройств пользователя. "
+        f"Красная зона от {snap.get('thresholds', {}).get('red', 60)}, "
+        f"жёлтая от {snap.get('thresholds', {}).get('amber', 35)}."
     )
     lines.append("")
     return "\n".join(lines) + "\n"

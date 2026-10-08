@@ -9,12 +9,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
-from app.deps import require_user
+from app.deps import require_session_user, require_user
 from app.models import Node
-from app.services import sharing_detect
+from app.services import sharing_detect, sharing_watch, subwatch
 from app.services.sharing_scanner import scan_once as scan_now
 
 router = APIRouter(prefix="/sharing", tags=["sharing"])
+
+
+class SharingPart(BaseModel):
+    key: str
+    points: float
+    why: str
 
 
 class SharingUserHit(BaseModel):
@@ -29,6 +35,19 @@ class SharingUserHit(BaseModel):
     ips_on_node: int = 0
     reasons: list[str] = []
     rw_nodes: list[str] = []
+    # Оценка и её расшифровка. Старые поля выше оставлены как были: их читает
+    # карточка ноды, и ломать её ради нового раздела незачем.
+    score: int = 0
+    level: str = "green"
+    device_limit: int = 0
+    unlimited: bool = False
+    parts: list[SharingPart] = []
+    countries: list[str] = []
+    platforms: list[str] = []
+    hwid_active: int | None = None
+    hwid_total: int | None = None
+    night_busy_pct: float | None = None
+    traffic_ratio: float | None = None
 
 
 class SharingNodePeers(BaseModel):
@@ -42,6 +61,7 @@ class SharingStatusOut(BaseModel):
     scanning: bool = False
     online_users: int = 0
     flagged: int = 0
+    suspects: list[SharingUserHit] = []
     by_agent_id: dict[str, list[SharingUserHit]]
     peers_by_agent_id: dict[str, SharingNodePeers] = {}
     thresholds: dict[str, int]
@@ -52,6 +72,82 @@ class SharingDossierOut(BaseModel):
     text: str
 
 
+class SharingConfigOut(BaseModel):
+    enabled: bool
+    red: int
+    amber: int
+    red_streak: int
+    green_streak: int
+    fallback_device_limit: int
+    unlimited_as: int
+    ip_per_device: float
+    ip_slack_5m: float
+    ip_slack_15m: float
+    conc_ip_per_device: float
+    conc_ip_slack: float
+    net_per_device: float
+    net_slack: float
+    w_conc_ips: float
+    w_conc_nets: float
+    w_ips_5m: float
+    w_ips_15m: float
+    w_platforms: float
+    w_travel: float
+    w_hwid: float
+    w_night: float
+    w_traffic: float
+    traffic_median_mult: float
+    night_window_h: int
+    night_min_days: int
+    night_quiet_pct: float
+    night_full_pct: float
+    night_keep_days: int
+    hwid_active_min: int
+    users_refresh_min: int
+    max_candidates: int
+    notify: bool
+    chat_id: str
+    remind_hours: int
+    bot_ready: bool = False
+
+
+class SharingConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    red: int | None = None
+    amber: int | None = None
+    red_streak: int | None = None
+    green_streak: int | None = None
+    unlimited_as: int | None = None
+    ip_per_device: float | None = None
+    ip_slack_5m: float | None = None
+    ip_slack_15m: float | None = None
+    conc_ip_per_device: float | None = None
+    conc_ip_slack: float | None = None
+    net_per_device: float | None = None
+    net_slack: float | None = None
+    w_conc_ips: float | None = None
+    w_conc_nets: float | None = None
+    w_ips_5m: float | None = None
+    w_ips_15m: float | None = None
+    w_platforms: float | None = None
+    w_travel: float | None = None
+    w_hwid: float | None = None
+    w_night: float | None = None
+    w_traffic: float | None = None
+    traffic_median_mult: float | None = None
+    night_window_h: int | None = None
+    night_min_days: int | None = None
+    night_quiet_pct: float | None = None
+    night_full_pct: float | None = None
+    night_keep_days: int | None = None
+    hwid_active_min: int | None = None
+    users_refresh_min: int | None = None
+    max_candidates: int | None = None
+    notify: bool | None = None
+    chat_id: str | None = None
+    remind_hours: int | None = None
+
+
 def _status_out() -> SharingStatusOut:
     snap = sharing_detect.snapshot()
     return SharingStatusOut(
@@ -60,9 +156,18 @@ def _status_out() -> SharingStatusOut:
         scanning=bool(snap.get("scanning")),
         online_users=int(snap.get("online_users") or 0),
         flagged=int(snap.get("flagged") or 0),
+        suspects=snap.get("suspects") or [],
         by_agent_id=snap.get("by_agent_id") or {},
         peers_by_agent_id=snap.get("peers_by_agent_id") or {},
         thresholds=snap.get("thresholds") or {},
+    )
+
+
+async def _config_out(db: AsyncSession, cfg: dict) -> SharingConfigOut:
+    return SharingConfigOut(
+        **{k: cfg.get(k, v) for k, v in sharing_watch.DEFAULTS.items()},
+        bot_ready=bool(await subwatch.bot_token(db))
+        and bool(await sharing_watch.effective_chat(db, cfg)),
     )
 
 
@@ -75,6 +180,32 @@ async def sharing_status(_: str = Depends(require_user)) -> SharingStatusOut:
 async def sharing_scan(_: str = Depends(require_user)) -> SharingStatusOut:
     await scan_now()
     return _status_out()
+
+
+@router.get("/settings", response_model=SharingConfigOut)
+async def sharing_settings(
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> SharingConfigOut:
+    return await _config_out(db, await sharing_watch.get_config(db))
+
+
+@router.patch("/settings", response_model=SharingConfigOut)
+async def update_sharing_settings(
+    body: SharingConfigUpdate,
+    _: str = Depends(require_session_user),   # пороги меняет человек, не скрипт
+    db: AsyncSession = Depends(get_db),
+) -> SharingConfigOut:
+    cfg = await sharing_watch.get_config(db)
+    for key, value in body.model_dump(exclude_unset=True).items():
+        if value is None:
+            continue
+        cfg[key] = value.strip() if isinstance(value, str) else value
+    await sharing_watch.save_config(db, cfg)
+    await db.commit()
+    # Окно хранения профиля могли сузить — пусть пересчитается не через полчаса.
+    sharing_watch.forget_profiles()
+    return await _config_out(db, cfg)
 
 
 async def _dossier_for_node(db: AsyncSession, node_id: uuid.UUID) -> SharingDossierOut:
@@ -118,4 +249,28 @@ async def node_dossier_txt(
         data.text,
         media_type="text/plain; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{data.filename}"'},
+    )
+
+
+@router.get("/users/{user_id}/dossier", response_model=SharingDossierOut)
+async def user_dossier(
+    user_id: int,
+    _: str = Depends(require_user),
+) -> SharingDossierOut:
+    return SharingDossierOut(
+        filename=f"sharing-user-{user_id}.txt",
+        text=sharing_detect.build_dossier(user_id),
+    )
+
+
+@router.get("/users/{user_id}/dossier.txt")
+async def user_dossier_txt(
+    user_id: int,
+    _: str = Depends(require_user),
+) -> PlainTextResponse:
+    text = sharing_detect.build_dossier(user_id)
+    return PlainTextResponse(
+        text,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="sharing-user-{user_id}.txt"'},
     )
