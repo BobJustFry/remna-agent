@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-VERSION = "0.1.22"
+VERSION = "0.1.23"
 STARTED_AT = time.time()
 _LAST_CPU = None
 _VIRT_CACHE: tuple[str | None] | None = None
@@ -164,6 +164,75 @@ def swap_stats() -> dict:
         }
     except Exception:
         return empty
+
+
+_XRAY_COMMS = ("rw-core", "xray")
+_XRAY_CACHE: tuple[float, dict] | None = None
+_XRAY_TTL = 15.0
+
+
+def xray_proc_info() -> dict:
+    """RSS и возраст процесса ядра (rw-core / xray) из /proc, без вызова утилит.
+
+    rw-core крутится внутри контейнера remnanode, но PID-пространство у него
+    общее с хостом, так что из /proc он виден. Если процессов несколько —
+    берём самый тяжёлый. Нет процесса — поля None: это «ядра нет», а не ноль.
+    Результат кэшируем на 15 с: /metrics опрашивают и сэмплер, и живой список.
+    """
+    global _XRAY_CACHE
+    now = time.monotonic()
+    if _XRAY_CACHE is not None and now - _XRAY_CACHE[0] < _XRAY_TTL:
+        return _XRAY_CACHE[1]
+    empty = {"xray_rss_mb": None, "xray_age_sec": None, "xray_pid": None}
+    best: tuple[int, int] | None = None  # (rss_kb, pid)
+    try:
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdigit():
+                continue
+            try:
+                comm = Path(entry.path, "comm").read_text(encoding="utf-8").strip()
+                if comm not in _XRAY_COMMS:
+                    continue
+                rss_kb = 0
+                with open(f"{entry.path}/status", encoding="utf-8") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            rss_kb = int(line.split()[1])
+                            break
+                if best is None or rss_kb > best[0]:
+                    best = (rss_kb, int(entry.name))
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        best = None
+    out = dict(empty)
+    if best is not None:
+        out["xray_rss_mb"] = round(best[0] / 1024, 1)
+        out["xray_pid"] = best[1]
+        try:
+            raw = Path(f"/proc/{best[1]}/stat").read_text(encoding="utf-8")
+            # comm может содержать пробелы и скобки — режем по последней «)».
+            fields = raw.rsplit(")", 1)[1].split()
+            start_ticks = int(fields[19])
+            hz = os.sysconf("SC_CLK_TCK")
+            up = float(Path("/proc/uptime").read_text(encoding="utf-8").split()[0])
+            out["xray_age_sec"] = max(0, int(up - start_ticks / hz))
+        except (OSError, ValueError, IndexError):
+            pass
+    _XRAY_CACHE = (now, out)
+    return out
+
+
+def mem_available_mb() -> float | None:
+    """MemAvailable в МБ — сколько памяти реально можно отдать без свопа."""
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def disk_stats(path: str = "/") -> tuple[float | None, float | None, float | None]:
@@ -1305,6 +1374,8 @@ def collect_metrics() -> dict:
         **cf204_info(),
         **net_info(),
         **swap_stats(),
+        "mem_available_mb": mem_available_mb(),
+        **xray_proc_info(),
         **tcp_counters(),
         **tcp_ext_counters(),
         "oom_kill_total": oom_kill_total(),

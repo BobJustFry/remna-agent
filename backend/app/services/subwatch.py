@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AppSetting, SubCheck
 from app.services.crypto import decrypt_secret
+from app.services import telegram
 from app.services.telegram import send_message
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ log = logging.getLogger(__name__)
 CONFIG_KEY = "subwatch_config"
 STATE_KEY = "subwatch_state"
 TG_TOKEN_KEY = "telegram_bot_token"
+TG_PROXY_KEY = "telegram_proxy"
 
 # Клиенты представляются по-разному, а панель по User-Agent выбирает формат.
 # Нейтральный агент даёт базовый список ссылок — его и разбираем.
@@ -209,6 +211,22 @@ async def bot_token(db: AsyncSession) -> str:
         return decrypt_secret(row.value_enc)
     except Exception:  # noqa: BLE001 — сменился ключ шифрования
         return ""
+
+
+async def telegram_proxy(db: AsyncSession) -> str:
+    """Прокси для Telegram из базы (расшифрованный); пусто — идём напрямую."""
+    row = await db.get(AppSetting, TG_PROXY_KEY)
+    if not row or not row.value_enc:
+        return ""
+    try:
+        return decrypt_secret(row.value_enc)
+    except Exception:  # noqa: BLE001 — сменился ключ шифрования
+        return ""
+
+
+async def apply_telegram_proxy(db: AsyncSession) -> None:
+    """Прочитать прокси из базы и выставить его модулю telegram."""
+    telegram.set_proxy(await telegram_proxy(db))
 
 
 # ── один цикл проверки ───────────────────────────────────────────────────────

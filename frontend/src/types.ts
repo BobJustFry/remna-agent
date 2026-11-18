@@ -75,6 +75,11 @@ export type AgentStatus = {
   swap_percent?: number | null;
   ru_ping_ms?: number | null;
   ru_loss_pct?: number | null;
+  /** Память для памятьсторожа. Нет на агентах < 0.1.23. */
+  mem_total_mb?: number | null;
+  mem_available_mb?: number | null;
+  xray_rss_mb?: number | null;
+  xray_age_sec?: number | null;
   /** Channel limit of this node's hosting, Mbit/s. */
   hosting_bandwidth_mbps: number | null;
   /** Users the Xray core reports online, delivered with this node's own event. */
@@ -145,6 +150,8 @@ export type MetricPoint = {
   /** Пинг и потери до якорей RIPE Atlas в Москве, с самой ноды. */
   ru_ping_ms?: number | null;
   ru_loss_pct?: number | null;
+  /** RSS процесса ядра (rw-core), МБ. Агент 0.1.23+. */
+  xray_rss_mb?: number | null;
 };
 
 export type NodesMetricsResponse = {
@@ -249,7 +256,34 @@ export type SharingConfig = {
   notify: boolean;
   chat_id: string;
   remind_hours: number;
+  auto_ban: boolean;
+  auto_ban_score: number;
+  auto_ban_scans: number;
+  ban_exclude_ids: number[];
   bot_ready: boolean;
+};
+
+export type SharingBanRow = {
+  ts: string;
+  action: string;
+  source: string;
+  user_id: number;
+  username: string;
+  score: number;
+  ok: boolean;
+  skipped?: string | null;
+  error?: string | null;
+  warn?: string | null;
+};
+
+export type SharingBans = { banned: SharingBanRow[]; log: SharingBanRow[] };
+
+export type SharingBanResult = {
+  ok: boolean;
+  skipped?: string | null;
+  error?: string | null;
+  warn?: string | null;
+  steps: string[];
 };
 
 export type SharingConfigUpdate = Partial<Omit<SharingConfig, "bot_ready" | "fallback_device_limit">>;

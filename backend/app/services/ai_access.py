@@ -121,6 +121,10 @@ URLS = {
     "chatgpt_web": "https://chatgpt.com/",
     "openai_api": "https://api.openai.com/v1/models",
     "claude_web": "https://claude.ai/",
+    # Страницу claude.ai Cloudflare отдаёт curl-клиентам за управляемым
+    # челленджем (с 23.10.2026 — с большинства адресов дата-центров и WARP),
+    # хотя настоящий браузер проходит. Этот адрес не за челленджем.
+    "claude_api_boot": "https://claude.ai/api/bootstrap",
     "anthropic_api": "https://api.anthropic.com/v1/models",
     "gemini_web": "https://gemini.google.com/app",
     # Страница входа, а не главная: владелец судит о доступе по ней — при блоке
@@ -282,6 +286,27 @@ def judge_claude_web(r: Resp) -> Verdict:
     if kw:
         return Verdict(BLOCKED, f"{r.code} «{kw}»")
     return _soft_error(r, r.url[:60])
+
+
+# Страны, где Claude недоступен: там запасной признак «API отвечает» ничего не доказывает.
+CLAUDE_UNSUPPORTED = frozenset({"RU", "BY", "CN", "IR", "KP", "CU", "SY"})
+
+
+def judge_claude_fallback(page: Verdict, boot: Resp, country: str | None) -> Verdict:
+    """Страница за челленджем Cloudflare — смотрим на /api/bootstrap.
+
+    Челлендж — это защита от ботов, а не отказ по стране: настоящий браузер на
+    том же выходе получает страницу входа (проверено 23.10.2026). Поэтому если
+    JSON отдан, а страна выхода не из списка недоступных, засчитываем доступ.
+    """
+    if page.verdict != CHALLENGE:
+        return page
+    if (country or "").upper() in CLAUDE_UNSUPPORTED:
+        return page
+    ctype = boot.header("content-type").lower()
+    if boot.code == 200 and "json" in ctype and '"statsig"' in boot.text[:4000]:
+        return Verdict(OK, "200 /api/bootstrap (страница за капчей CF, ботам не отдаётся)")
+    return page
 
 
 def judge_anthropic_api(r: Resp) -> Verdict:
@@ -755,6 +780,13 @@ def _get(url: str, proxy: str, timeout: float = REQ_TIMEOUT, **kw) -> Resp:
     return _to_resp(r)
 
 
+def _claude_web(proxy: str, country: str | None) -> Verdict:
+    page = JUDGES["claude_web"](_get(URLS["claude_web"], proxy))
+    if page.verdict != CHALLENGE:
+        return page
+    return judge_claude_fallback(page, _get(URLS["claude_api_boot"], proxy), country)
+
+
 def _gemini_web(proxy: str) -> Verdict:
     from curl_cffi import requests as creq
 
@@ -890,6 +922,8 @@ def probe_target(t: Target, gemini_key: str = "", cancel: CancelToken | None = N
                     fn = lambda: _gemini_web(proxy)  # noqa: E731
                 elif key == "gemini_api":
                     fn = lambda: _gemini_api(proxy, gemini_key)  # noqa: E731
+                elif key == "claude_web":
+                    fn = lambda: _claude_web(proxy, out.get("ai_country"))  # noqa: E731
                 else:
                     judge = JUDGES[key]
                     url = URLS[key]
@@ -948,9 +982,37 @@ def notable(changes: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     return broke, fixed, moved
 
 
-def summary_text(changes: list[dict]) -> str | None:
+def followup_lines(prev_changes: list[dict] | None, rows: dict[str, dict]) -> list[str]:
+    """Что стало с тем, что сломалось в прошлый раз: без этого тишина читается как «всё ещё сломано».
+
+    rows — проверки текущего прогона. Таймаут и ошибка — «не удалось проверить»,
+    а не «починилось» и не «осталось».
+    """
+    broke, _, _ = notable(prev_changes or [])
+    if not broke:
+        return []
+    fixed = 0
+    left: list[str] = []
+    for c in broke:
+        row = rows.get(c["host_key"])
+        v = ((row or {}).get("results") or {}).get(c["service"], {}).get("v")
+        if v == OK:
+            fixed += 1
+        elif v in _BAD:
+            left.append(f"{c['host']} ({SERVICE_NAMES.get(c['service'], c['service'])} {v})")
+    unknown = len(broke) - fixed - len(left)
+    esc = html.escape
+    line = f"починилось {fixed} из {len(broke)}"
+    if unknown:
+        line += f", не удалось проверить: {unknown}"
+    if left:
+        line += "; остались: " + ", ".join(left)
+    return ["ℹ️ <b>Что было сломано в прошлый раз</b>", esc(line)]
+
+
+def summary_text(changes: list[dict], followup: list[str] | None = None) -> str | None:
     broke, fixed, moved = notable(changes)
-    if not (broke or fixed or moved):
+    if not (broke or fixed or moved or followup):
         return None
     esc = html.escape
 
@@ -969,6 +1031,8 @@ def summary_text(changes: list[dict]) -> str | None:
     if moved:
         out += ["", "🌍 <b>Сменилась страна выхода ИИ</b>",
                 *[f"• {esc(c['host'])}: {esc(c['before'])} → {esc(c['after'])}" for c in moved]]
+    if followup:
+        out += ["", *followup]
     return "\n".join(out)
 
 
@@ -1343,7 +1407,7 @@ async def _execute(run: _Run) -> None:
         await _db_finish(run, "done", changes=changes)
         log.info("ai-access: прогон готов, хостов %s, изменений %s", run.count(DONE), len(changes))
 
-        text = summary_text(changes)
+        text = summary_text(changes, await _db_followup(run))
         if text and cfg.get("notify"):
             err = await _send_summary(cfg, text)
             if err:
@@ -1427,6 +1491,22 @@ async def _db_changes(run: _Run) -> list[dict]:
         if prev is None:
             return []
         return diff_runs(await _rows_of(db, prev.id), await _rows_of(db, run.id))
+
+
+async def _db_followup(run: _Run) -> list[str]:
+    """Итог по тому, что сломалось в предыдущем полном прогоне."""
+    from app.db import SessionLocal
+
+    try:
+        async with SessionLocal() as db:
+            row = await db.get(AiRun, run.id)
+            prev = await previous_done(db, before=row.started_at if row else None)
+            if prev is None or not prev.changes:
+                return []
+            return followup_lines(prev.changes, await _rows_of(db, run.id))
+    except Exception:  # noqa: BLE001 — прогон уже записан, сводка не должна его ронять
+        log.exception("ai-access: не смог собрать итог по прошлым поломкам")
+        return []
 
 
 async def _send_summary(cfg: dict, text: str) -> str | None:

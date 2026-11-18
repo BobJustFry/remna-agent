@@ -101,6 +101,9 @@ class Observation:
     balance: float | None = None
     currency: str | None = None
     account_active: bool | None = None
+    account_id: str | None = None
+    account_name: str | None = None
+    owner_login: str | None = None
     vms: list[dict] = field(default_factory=list)
     duration_ms: int = 0
     error: str | None = None
@@ -234,6 +237,37 @@ def _vm(inst: dict) -> dict:
             "status": inst.get("status") or "UNKNOWN", "ip": ip}
 
 
+_OWNER_CACHE: dict[str, str] = {}
+
+
+def _owner_login(token: str, account_id: str) -> str | None:
+    """Почта владельца платёжного аккаунта. Читаем один раз за жизнь процесса;
+    любая ошибка (нет прав и т.п.) — просто без почты, алерт от этого не страдает."""
+    if account_id in _OWNER_CACHE:
+        return _OWNER_CACHE[account_id]
+    try:
+        acl = _request(
+            "GET", BILLING_URL + urllib.parse.quote(account_id) + ":listAccessBindings",
+            token=token)
+        for b in acl.get("accessBindings") or []:
+            if b.get("roleId") != "billing.accounts.owner":
+                continue
+            subj = b.get("subject") or {}
+            if subj.get("type") != "userAccount":
+                continue
+            user = _request(
+                "GET", "https://iam.api.cloud.yandex.net/iam/v1/userAccounts/"
+                + urllib.parse.quote(subj["id"]), token=token)
+            pp = user.get("yandexPassportUserAccount") or {}
+            login = pp.get("defaultEmail") or pp.get("login")
+            if login:
+                _OWNER_CACHE[account_id] = login
+                return login
+    except Exception as exc:  # noqa: BLE001 — best effort
+        log.debug("ycwatch: владелец аккаунта не определён: %s", exc)
+    return None
+
+
 def probe(key: dict, cfg: dict) -> Observation:
     """Баланс и статус ВМ. Только GET-ы: в облаке ничего не меняем."""
     started = time.monotonic()
@@ -246,6 +280,9 @@ def probe(key: dict, cfg: dict) -> Observation:
         obs.balance = float(raw) if raw not in (None, "") else None
         obs.currency = acc.get("currency")
         obs.account_active = acc.get("active")
+        obs.account_id = acc.get("id") or cfg["billing_account_id"]
+        obs.account_name = acc.get("name")
+        obs.owner_login = _owner_login(token, obs.account_id)
 
         query = urllib.parse.urlencode({"folderId": cfg["folder_id"], "pageSize": 100})
         inst = _request("GET", f"{COMPUTE_URL}?{query}", token=token)
@@ -412,6 +449,16 @@ def _vm_line(obs: Observation) -> str:
         for v in obs.vms)
 
 
+def _account_line(obs: Observation) -> str | None:
+    """Какой именно платёжный аккаунт смотрим: в консоли их может быть несколько."""
+    if not obs.account_id and not obs.account_name:
+        return None
+    name = html.escape(obs.account_name or "без имени")
+    ident = f" (id: <code>{html.escape(obs.account_id)}</code>)" if obs.account_id else ""
+    owner = f"\nВладелец (логин Яндекса): <code>{html.escape(obs.owner_login)}</code>" if obs.owner_login else ""
+    return f"Платёжный аккаунт: <b>{name}</b>{ident}{owner}"
+
+
 def _days_line(days: float | None, rate: float | None, currency: str | None) -> str | None:
     if days is None or rate is None:
         return None
@@ -437,14 +484,15 @@ def _text(level: str, prev: str | None, cfg: dict, obs: Observation, reasons: li
         lines.append("Облако снова отвечает.")
     lines.extend(html.escape(r) for r in reasons)
     lines.append(f"Баланс: {_money(obs.balance or 0.0, obs.currency)}")
+    lines.append(_account_line(obs))
     lines.append(_vm_line(obs))
     days_line = _days_line(days, rate, obs.currency)
     if days_line:
         lines.append(days_line)
     if level == CRITICAL:
-        lines.append("Пополнить баланс и, если ВМ остановлена, запустить её руками в консоли.")
+        lines.append("Пополнить именно этот аккаунт и, если ВМ остановлена, запустить её руками в консоли.")
     elif level == LOW:
-        lines.append("Пополнить баланс, пока Яндекс не остановил ВМ (так было 01.10).")
+        lines.append("Пополнить именно этот аккаунт, пока Яндекс не остановил ВМ (так было 01.10).")
     return "\n".join(x for x in lines if x)
 
 

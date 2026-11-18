@@ -15,9 +15,11 @@ from app.schemas import (
     SubwatchConfigOut,
     SubwatchConfigUpdate,
     SubwatchStatusOut,
+    TelegramProbeIn,
 )
 from app.services import subwatch
 from app.services.crypto import encrypt_secret
+from app.services import telegram
 from app.services.telegram import send_message
 
 router = APIRouter(prefix="/subwatch", tags=["subwatch"])
@@ -32,8 +34,10 @@ def _row(c) -> SubCheckOut:
 
 async def _config_out(db: AsyncSession, cfg: dict) -> SubwatchConfigOut:
     token = await subwatch.bot_token(db)
+    proxy = await subwatch.telegram_proxy(db)
     return SubwatchConfigOut(**{k: cfg.get(k, v) for k, v in subwatch.DEFAULTS.items()},
-                             bot_token_set=bool(token))
+                             bot_token_set=bool(token), proxy_set=bool(proxy),
+                             proxy_masked=telegram.mask_proxy(proxy))
 
 
 async def _status(db: AsyncSession) -> SubwatchStatusOut:
@@ -92,6 +96,11 @@ async def update_settings(
     cfg = await subwatch.get_config(db)
     data = body.model_dump(exclude_unset=True)
     token = data.pop("bot_token", None)
+    proxy = data.pop("telegram_proxy", None)
+    if proxy is not None and proxy.strip():
+        bad = telegram.validate_proxy(proxy)
+        if bad:
+            raise HTTPException(status_code=422, detail=bad)
 
     for key, value in data.items():
         if value is None:
@@ -107,8 +116,19 @@ async def update_settings(
         # Токен бота — секрет: в базе лежит зашифрованным и наружу не отдаётся.
         row.value_enc = encrypt_secret(token.strip()) if token.strip() else None
 
+    if proxy is not None:
+        row = await db.get(AppSetting, subwatch.TG_PROXY_KEY)
+        if row is None:
+            row = AppSetting(key=subwatch.TG_PROXY_KEY, value_enc=None)
+            db.add(row)
+            await db.flush()
+        # В адресе прокси бывают логин и пароль — хранится так же, как токен.
+        row.value_enc = encrypt_secret(proxy.strip()) if proxy.strip() else None
+
     await subwatch.save_config(db, cfg)
     await db.commit()
+    if proxy is not None:
+        await subwatch.apply_telegram_proxy(db)
     return await _status(db)
 
 
@@ -129,3 +149,71 @@ async def telegram_test(
     if err:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=err)
     return {"sent": True}
+
+
+def _unavailable(err: telegram.TelegramError) -> HTTPException:
+    via = "через прокси" if telegram.get_proxy() else "напрямую"
+    text = str(err)
+    if "недоступен" not in text:
+        text = f"Telegram недоступен {via}: {text}"
+    return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=text)
+
+
+def _temp_proxy(body: TelegramProbeIn | None) -> str | None:
+    """Прокси из тела запроса для разовой проверки (не сохраняется).
+
+    None — в теле его нет, значит работаем с сохранённым. Адрес валидируется как
+    при сохранении; в тексте ошибки его нет (там может быть логин и пароль).
+    """
+    if body is None or body.proxy is None:
+        return None
+    value = body.proxy.strip()
+    if value:
+        bad = telegram.validate_proxy(value)
+        if bad:
+            raise HTTPException(status_code=422, detail=bad)
+    return value
+
+
+@router.post("/telegram/check-proxy")
+async def telegram_check_proxy(
+    _: str = Depends(require_session_user),
+    db: AsyncSession = Depends(get_db),
+    body: TelegramProbeIn | None = None,
+) -> dict:
+    """getMe через прокси из тела запроса (временно) или сохранённый."""
+    temp = _temp_proxy(body)
+    token = await subwatch.bot_token(db)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Сначала задайте токен бота")
+    await subwatch.apply_telegram_proxy(db)
+    with telegram.using_proxy(temp):
+        try:
+            me = await asyncio.to_thread(telegram.get_me, token)
+        except telegram.TelegramError as exc:
+            raise _unavailable(exc) from None
+    name = me.get("username") or me.get("first_name") or "?"
+    return {"ok": True, "username": name, "message": f"бот @{name} доступен"}
+
+
+@router.post("/detect-chat")
+async def detect_chat(
+    _: str = Depends(require_session_user),
+    db: AsyncSession = Depends(get_db),
+    body: TelegramProbeIn | None = None,
+) -> dict:
+    """Какие чаты писали боту (getUpdates). Тексты сообщений наружу не идут."""
+    temp = _temp_proxy(body)
+    token = await subwatch.bot_token(db)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Сначала задайте токен бота")
+    await subwatch.apply_telegram_proxy(db)
+    with telegram.using_proxy(temp):
+        try:
+            chats = await asyncio.to_thread(telegram.detect_chats, token)
+        except telegram.TelegramError as exc:
+            raise _unavailable(exc) from None
+    hint = None if chats else "Напишите боту любое слово (или добавьте его в группу и напишите там), потом нажмите ещё раз."
+    return {"chats": chats, "hint": hint}

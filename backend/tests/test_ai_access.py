@@ -137,6 +137,23 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual(ai.judge_openai_api(chal).verdict, ai.CHALLENGE)
         self.assertEqual(ai.judge_openai_api(Resp(500, url, "{}", JSON)).verdict, ai.ERROR)
 
+    def test_claude_fallback_on_challenge(self) -> None:
+        page = ai.Verdict(ai.CHALLENGE, "403 челлендж Cloudflare")
+        js = {"content-type": "application/json; charset=utf-8"}
+        boot = Resp(200, "https://claude.ai/api/bootstrap", '{"account":null,"statsig":{"user":{}}}', js)
+        self.assertEqual(ai.judge_claude_fallback(page, boot, "DE").verdict, ai.OK)
+        # Недоступная страна: API-ответ ничего не доказывает.
+        self.assertEqual(ai.judge_claude_fallback(page, boot, "RU").verdict, ai.CHALLENGE)
+        # Челлендж и на API — остаётся челленджем.
+        bad = Resp(403, "https://claude.ai/api/bootstrap", CF_CHALLENGE, {**HTML, "cf-mitigated": "challenge"})
+        self.assertEqual(ai.judge_claude_fallback(page, bad, "DE").verdict, ai.CHALLENGE)
+        # Не JSON с нужным ключом — тоже.
+        junk = Resp(200, "https://claude.ai/api/bootstrap", "<html></html>", HTML)
+        self.assertEqual(ai.judge_claude_fallback(page, junk, "DE").verdict, ai.CHALLENGE)
+        # Не челлендж на странице — вердикт страницы не трогаем.
+        blocked = ai.Verdict(ai.BLOCKED, "x")
+        self.assertEqual(ai.judge_claude_fallback(blocked, boot, "DE").verdict, ai.BLOCKED)
+
     def test_claude_web(self) -> None:
         ok = Resp(200, "https://claude.ai/login", CLAUDE_LOGIN, HTML, ["https://claude.ai/"])
         v = ai.judge_claude_web(ok)
@@ -422,6 +439,32 @@ class DiffTests(unittest.TestCase):
         changes = [{"host": "X", "host_key": "X", "service": "chatgpt_web", "before": "ok", "after": "timeout"}]
         self.assertIsNone(ai.summary_text(changes))
         self.assertIsNone(ai.summary_text([]))
+
+    def test_followup_after_break(self) -> None:
+        # Прошлый прогон сломал три пары; сейчас одна ok, одна всё ещё челлендж, одна таймаут.
+        prev_changes = [
+            {"host": "DE", "host_key": "DE", "service": "claude_web", "before": "ok", "after": "challenge"},
+            {"host": "FI <b>", "host_key": "FI", "service": "claude_web", "before": "ok", "after": "blocked"},
+            {"host": "NO", "host_key": "NO", "service": "chatgpt_web", "before": "ok", "after": "challenge"},
+            {"host": "UA", "host_key": "UA", "service": "chatgpt_web", "before": "ok", "after": "timeout"},
+        ]
+        rows = {"DE": self._row("DE", claude_web="ok"),
+                "FI": self._row("FI <b>", claude_web="blocked"),
+                "NO": self._row("NO", chatgpt_web="timeout")}
+        lines = ai.followup_lines(prev_changes, rows)
+        text = ai.summary_text([], lines)       # в этом прогоне ничего не изменилось
+        assert text is not None
+        self.assertIn("Что было сломано в прошлый раз", text)
+        self.assertIn("починилось 1 из 3", text)
+        self.assertIn("не удалось проверить: 1", text)
+        self.assertIn("остались: FI &lt;b&gt; (Claude blocked)", text)
+        self.assertNotIn("Починилось", text)    # сам блок «Починилось» без изменений не рисуется
+
+    def test_followup_absent_without_prev_break(self) -> None:
+        fixed_only = [{"host": "X", "host_key": "X", "service": "claude_web", "before": "challenge", "after": "ok"}]
+        self.assertEqual(ai.followup_lines(fixed_only, {}), [])
+        self.assertEqual(ai.followup_lines(None, {}), [])
+        self.assertIsNone(ai.summary_text([], []))
 
     def test_summary_escapes_html(self) -> None:
         changes = [{"host": "A<b>&", "host_key": "A", "service": "chatgpt_web", "before": "ok", "after": "blocked"}]

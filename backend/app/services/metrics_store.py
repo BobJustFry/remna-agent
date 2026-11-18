@@ -87,6 +87,7 @@ async def insert_samples(
             swap_percent=_round(row.get("swap_percent")),
             ru_ping_ms=_round(row.get("ru_ping_ms")),
             ru_loss_pct=_round(row.get("ru_loss_pct")),
+            xray_rss_mb=_round(row.get("xray_rss_mb")),
         )
         for row in rows
     ]
@@ -185,6 +186,7 @@ async def fetch_series(
         func.avg(NodeMetricSample.swap_percent).label("swap_percent"),
         func.avg(NodeMetricSample.ru_ping_ms).label("ru_ping_ms"),
         func.avg(NodeMetricSample.ru_loss_pct).label("ru_loss_pct"),
+        func.max(NodeMetricSample.xray_rss_mb).label("xray_rss_mb"),
     )
     if since is not None:
         stmt = stmt.where(NodeMetricSample.recorded_at >= since)
@@ -215,6 +217,7 @@ async def fetch_series(
         swap_percent,
         ru_ping_ms,
         ru_loss_pct,
+        xray_rss_mb,
     ) in result.all():
         if t_raw is None:
             continue
@@ -253,6 +256,7 @@ async def fetch_series(
                 "swap_percent": _round(swap_percent),
                 "ru_ping_ms": _round(ru_ping_ms),
                 "ru_loss_pct": _round(ru_loss_pct),
+                "xray_rss_mb": _round(xray_rss_mb),
             }
         )
     return step, from_ts, to_ts, series

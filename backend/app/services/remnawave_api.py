@@ -103,6 +103,7 @@ def rw_fleet() -> dict[str, dict] | None:
     except RemnawaveApiError:
         return None
     out: dict[str, dict] = {}
+    claims: dict[str, int] = {}
     for n in nodes:
         addr = (n.get("address") or "").strip()
         if not addr:
@@ -112,12 +113,19 @@ def rw_fleet() -> dict[str, dict] | None:
         except (TypeError, ValueError):
             users = None
         connected = n.get("isConnected")
+        up = n.get("xrayUptime")
         info = {
             "users": users,
             "connected": connected if isinstance(connected, bool) else None,
             "disabled": n.get("isDisabled") is True,
+            # Для памятьсторожа: какой именно узел панели и сколько живёт его ядро.
+            "uuid": n.get("uuid") if isinstance(n.get("uuid"), str) else None,
+            "name": n.get("name") if isinstance(n.get("name"), str) else None,
+            "xray_uptime": int(up) if isinstance(up, (int, float)) and not isinstance(up, bool) else None,
+            "dup": False,
         }
         out[addr] = info
+        claims[addr] = claims.get(addr, 0) + 1
         # Ноды за CDN панель адресует origin-доменом, а у нас та же машина
         # записана по IP (рагент ходит к ней по SSH, и завязывать его на
         # CDN-домен нельзя). Без второго ключа такая нода выглядит в карточке
@@ -125,7 +133,13 @@ def rw_fleet() -> dict[str, dict] | None:
         if not _IPV4.match(addr):
             ip = _resolve(addr)
             if ip:
-                out.setdefault(ip, info)
+                claims[ip] = claims.get(ip, 0) + 1
+                out.setdefault(ip, dict(info))
+    # Один адрес занят двумя узлами панели — какой из них «наш», не знаем:
+    # перезапускать по такому ключу нельзя.
+    for key, n_claims in claims.items():
+        if n_claims > 1 and key in out:
+            out[key]["dup"] = True
     return out
 
 

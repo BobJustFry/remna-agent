@@ -141,6 +141,11 @@ class AgentNodeStatus(BaseModel):
     swap_percent: float | None = None
     ru_ping_ms: float | None = None
     ru_loss_pct: float | None = None
+    # Память для памятьсторожа (агент 0.1.23).
+    mem_total_mb: float | None = None
+    mem_available_mb: float | None = None
+    xray_rss_mb: float | None = None
+    xray_age_sec: int | None = None
     # Channel limit of the node's hosting, Mbit/s — null when the hosting has none set.
     hosting_bandwidth_mbps: int | None = None
     # Users the Xray core reports online. Rides with the node event so it does not
@@ -221,6 +226,8 @@ class MetricPointOut(BaseModel):
     swap_percent: float | None = None
     ru_ping_ms: float | None = None
     ru_loss_pct: float | None = None
+    # RSS процесса ядра, МБ (макс. за шаг). Агент 0.1.23+.
+    xray_rss_mb: float | None = None
 
 
 class NodesMetricsResponse(BaseModel):
@@ -548,6 +555,8 @@ class SubwatchConfigOut(BaseModel):
     notify: bool = True
     chat_id: str = ""
     bot_token_set: bool = False
+    proxy_set: bool = False
+    proxy_masked: str = ""            # схема://host:port, без логина и пароля
 
 
 class SubwatchConfigUpdate(BaseModel):
@@ -559,6 +568,15 @@ class SubwatchConfigUpdate(BaseModel):
     notify: bool | None = None
     chat_id: str | None = None
     bot_token: str | None = None      # пустая строка стирает токен
+    telegram_proxy: str | None = None  # пустая строка стирает прокси
+
+
+class TelegramProbeIn(BaseModel):
+    """Необязательное тело проверок Telegram: прокси из поля формы, без сохранения.
+
+    Нет поля — берётся сохранённый прокси; пустая строка — проверка напрямую.
+    """
+    proxy: str | None = None
 
 
 class SubwatchStatusOut(BaseModel):

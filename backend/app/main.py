@@ -11,7 +11,10 @@ from app.api import (
     ai_access as ai_access_api,
     audit,
     auth,
+    donor_watch as donor_watch_api,
     hostings,
+    fleet_report as fleet_report_api,
+    mem_watch as mem_watch_api,
     node_watch as node_watch_api,
     nodes,
     panel_backup as panel_backup_api,
@@ -22,19 +25,36 @@ from app.api import (
     ycwatch as ycwatch_api,
 )
 from app.config import assert_secure_settings, settings
+from app.db import SessionLocal
+from app.logging_safety import setup_log_safety
 from app.services import ai_access
 from app.services.metrics_sampler import run_metrics_sampler
 from app.services.sharing_scanner import run_sharing_scanner
 from app.services.panel_backup import run_panel_backup
+from app.services import subwatch as subwatch_service
 from app.services.subwatch import run_subwatch
 from app.services.ycwatch import run_ycwatch
+from app.services.fleet_report import run_fleet_report
+from app.services.fleet_bot import run_fleet_bot
+from app.services.donor_watch_runner import run_donor_watch
 
 logging.basicConfig(level=logging.INFO)
+setup_log_safety()
+
+
+async def _load_telegram_proxy() -> None:
+    """Прокси для Telegram живёт в базе; модулю telegram его отдаём при старте."""
+    try:
+        async with SessionLocal() as db:
+            await subwatch_service.apply_telegram_proxy(db)
+    except Exception:  # noqa: BLE001 — база не готова: уведомления пойдут напрямую
+        logging.getLogger(__name__).warning("не удалось прочитать прокси для Telegram")
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     assert_secure_settings()
+    await _load_telegram_proxy()
     metrics = asyncio.create_task(run_metrics_sampler(), name="metrics-sampler")
     sharing_task = asyncio.create_task(run_sharing_scanner(), name="sharing-scanner")
     # Спит, пока следилка выключена в настройках: сама себя не включает.
@@ -43,11 +63,17 @@ async def lifespan(_app: FastAPI):
     ai_task = asyncio.create_task(ai_access.run_ai_access(), name="ai-access")
     # Без ключа СА в базе только ждёт: в облако не ходит.
     yc_task = asyncio.create_task(run_ycwatch(), name="ycwatch")
+    # Both sleep while the report is disabled (the default).
+    fleet_task = asyncio.create_task(run_fleet_report(), name="fleet-report")
+    fleet_bot_task = asyncio.create_task(run_fleet_bot(), name="fleet-bot")
+    # Сторож доноров ИИ: по умолчанию сухой прогон — профили не меняет.
+    donor_task = asyncio.create_task(run_donor_watch(), name="donor-watch")
     try:
         yield
     finally:
         await ai_access.shutdown()
-        for task in (metrics, sharing_task, subwatch_task, backup_task, ai_task, yc_task):
+        for task in (metrics, sharing_task, subwatch_task, backup_task, ai_task, yc_task,
+                     fleet_task, fleet_bot_task, donor_task):
             task.cancel()
             try:
                 await task
@@ -90,7 +116,10 @@ app.include_router(subwatch_api.router, prefix="/api")
 app.include_router(panel_backup_api.router, prefix="/api")
 app.include_router(ai_access_api.router, prefix="/api")
 app.include_router(node_watch_api.router, prefix="/api")
+app.include_router(mem_watch_api.router, prefix="/api")
+app.include_router(donor_watch_api.router, prefix="/api")
 app.include_router(ycwatch_api.router, prefix="/api")
+app.include_router(fleet_report_api.router, prefix="/api")
 
 
 @app.get("/api/health")

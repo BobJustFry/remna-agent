@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.deps import require_session_user, require_user
 from app.models import Node
-from app.services import sharing_detect, sharing_watch, subwatch
+from app.services import sharing_ban, sharing_detect, sharing_report, sharing_watch, subwatch
 from app.services.sharing_scanner import scan_once as scan_now
 
 router = APIRouter(prefix="/sharing", tags=["sharing"])
@@ -108,6 +108,10 @@ class SharingConfigOut(BaseModel):
     notify: bool
     chat_id: str
     remind_hours: int
+    auto_ban: bool = False
+    auto_ban_score: int = 85
+    auto_ban_scans: int = 5
+    ban_exclude_ids: list[int] = []
     bot_ready: bool = False
 
 
@@ -146,6 +150,36 @@ class SharingConfigUpdate(BaseModel):
     notify: bool | None = None
     chat_id: str | None = None
     remind_hours: int | None = None
+    auto_ban: bool | None = None
+    auto_ban_score: int | None = None
+    auto_ban_scans: int | None = None
+    ban_exclude_ids: list[int] | None = None
+
+
+class BanLogRow(BaseModel):
+    ts: str
+    action: str
+    source: str
+    user_id: int
+    username: str = ""
+    score: int = 0
+    ok: bool = False
+    skipped: str | None = None
+    error: str | None = None
+    warn: str | None = None
+
+
+class BansOut(BaseModel):
+    banned: list[BanLogRow] = []
+    log: list[BanLogRow] = []
+
+
+class BanActionOut(BaseModel):
+    ok: bool
+    skipped: str | None = None
+    error: str | None = None
+    warn: str | None = None
+    steps: list[str] = []
 
 
 def _status_out() -> SharingStatusOut:
@@ -200,6 +234,12 @@ async def update_sharing_settings(
     for key, value in body.model_dump(exclude_unset=True).items():
         if value is None:
             continue
+        if key == "auto_ban_score":
+            value = max(1, min(100, int(value)))
+        elif key == "auto_ban_scans":
+            value = max(1, min(1000, int(value)))
+        elif key == "ban_exclude_ids":
+            value = sorted({int(v) for v in value if int(v) > 0})
         cfg[key] = value.strip() if isinstance(value, str) else value
     await sharing_watch.save_config(db, cfg)
     await db.commit()
@@ -274,3 +314,95 @@ async def user_dossier_txt(
         media_type="text/plain; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="sharing-user-{user_id}.txt"'},
     )
+
+
+@router.get("/users/{user_id}/report")
+async def user_report(
+    user_id: int,
+    saved: bool = False,
+    fmt: str = "md",
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> PlainTextResponse:
+    """Отчёт-доказательство (markdown). Пользователь в жёлтой/красной зоне — свежий отчёт;
+    иначе (например, после бана) — копия, сохранённая в момент бана. saved=true — всегда копия.
+    fmt=md — технический отчёт, fmt=txt — клиентский текст (простым языком, для пересылки)."""
+    txt = fmt == "txt"
+    text = filename = None
+    if not saved and sharing_report.in_zone(user_id):
+        data = await sharing_report.collect(db, user_id)
+        if data is not None:
+            await db.commit()   # кеш геоданных
+            text = sharing_report.build_client_text(data) if txt else sharing_report.build_report(data)
+            filename = sharing_report.report_filename(
+                user_id, str(data.card.get("username") or ""), ext="txt" if txt else "md")
+    if text is None:
+        copy = await sharing_report.get_saved(db, user_id)
+        if copy is None:
+            raise HTTPException(
+                status_code=404,
+                detail="пользователь не в жёлтой/красной зоне и сохранённого отчёта нет")
+        ts = sharing_detect._parse_ts(copy.get("ts"))
+        text = str((copy.get("client") if txt else copy.get("text")) or "")
+        if not text:
+            raise HTTPException(status_code=404, detail="в сохранённой копии нет клиентского текста")
+        filename = sharing_report.report_filename(
+            user_id, str(copy.get("username") or ""), ts, "txt" if txt else "md")
+    return PlainTextResponse(
+        text,
+        media_type="text/plain; charset=utf-8" if txt else "text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _hit_for(user_id: int) -> dict:
+    """Строка подозреваемого из последнего скана; нет её — только id и имя из кэша."""
+    for h in sharing_detect.snapshot().get("suspects") or []:
+        if int(h.get("user_id")) == user_id:
+            return dict(h)
+    card = (sharing_detect.users_cache().get("by_id") or {}).get(user_id) or {}
+    return {"user_id": user_id, "username": card.get("username", ""), "score": 0, "parts": []}
+
+
+def _action_out(res: dict) -> BanActionOut:
+    return BanActionOut(ok=bool(res.get("ok")), skipped=res.get("skipped"),
+                        error=res.get("error"), warn=res.get("warn"),
+                        steps=list(res.get("steps") or []))
+
+
+@router.get("/bans", response_model=BansOut)
+async def sharing_bans(
+    _: str = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> BansOut:
+    rows = await sharing_ban.get_log(db)
+    return BansOut(banned=sharing_ban.banned_now(rows)[::-1], log=rows[-50:][::-1])
+
+
+@router.post("/users/{user_id}/ban", response_model=BanActionOut)
+async def sharing_ban_user(
+    user_id: int,
+    _: str = Depends(require_session_user),   # банит человек из браузера, не скрипт
+    db: AsyncSession = Depends(get_db),
+) -> BanActionOut:
+    cfg = await sharing_watch.get_config(db)
+    res = await sharing_ban.ban(db, cfg, _hit_for(user_id), "manual")
+    await db.commit()
+    if not res.get("ok"):
+        raise HTTPException(status_code=502, detail=res.get("error") or "панель не ответила")
+    return _action_out(res)
+
+
+@router.post("/users/{user_id}/unban", response_model=BanActionOut)
+async def sharing_unban_user(
+    user_id: int,
+    _: str = Depends(require_session_user),
+    db: AsyncSession = Depends(get_db),
+) -> BanActionOut:
+    cfg = await sharing_watch.get_config(db)
+    hit = _hit_for(user_id)
+    res = await sharing_ban.unban(db, cfg, user_id, str(hit.get("username") or ""))
+    await db.commit()
+    if not res.get("ok"):
+        raise HTTPException(status_code=502, detail=res.get("error") or "панель не ответила")
+    return _action_out(res)

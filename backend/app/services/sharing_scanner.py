@@ -39,7 +39,16 @@ async def scan_once() -> None:
     async with SessionLocal() as db:
         await sharing_watch.record_activity(db, out["online_ids"])
         events = await sharing_watch.handle_scan(db, cfg, out.get("suspects") or [])
+        # Автобан после тревог, до коммита: состояние и журнал уходят одной записью.
+        try:
+            from app.services import sharing_ban
+            banned = await sharing_ban.process_auto_bans(db, cfg, out.get("suspects") or [])
+        except Exception:
+            log.exception("sharing auto-ban failed")
+            banned = []
         await db.commit()
+        if banned:
+            log.info("sharing: автобан %s", [(k, h.get("username")) for k, h in banned])
         if events:
             log.info("sharing: события %s", [(k, h.get("username")) for k, h in events])
             await sharing_watch.notify(db, cfg, events)

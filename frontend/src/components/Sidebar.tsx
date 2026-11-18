@@ -62,6 +62,9 @@ export function Sidebar({ username, onLogout, open, onClose }: Props) {
             <NavItem to="/sharing" onNavigate={onClose}>
               Шаринг
             </NavItem>
+            <NavItem to="/memory" onNavigate={onClose}>
+              Память
+            </NavItem>
           </NavSection>
 
           <NavSection title="Управление">

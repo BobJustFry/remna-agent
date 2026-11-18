@@ -8,6 +8,8 @@ import type {
   NodeItem,
   NodesMetricsResponse,
   OnlineMap,
+  SharingBanResult,
+  SharingBans,
   SharingConfig,
   SharingConfigUpdate,
   SharingDossier,
@@ -122,6 +124,26 @@ export const api = {
     request<SharingDossier>(`/api/sharing/nodes/${nodeId}/dossier`),
   sharingUserDossier: (userId: number) =>
     request<SharingDossier>(`/api/sharing/users/${userId}/dossier`),
+  /** Отчёт-доказательство (md — технический, txt — клиентский текст): свежий для жёлтой/красной зоны, иначе копия на момент бана. */
+  sharingUserReport: async (userId: number, saved = false, format: "md" | "txt" = "md") => {
+    const q = new URLSearchParams({ fmt: format });
+    if (saved) q.set("saved", "true");
+    const res = await fetch(`/api/sharing/users/${userId}/report?${q.toString()}`, {
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(typeof data.detail === "string" ? data.detail : "Не удалось собрать отчёт");
+    }
+    const cd = res.headers.get("Content-Disposition") ?? "";
+    const m = /filename="([^"]+)"/.exec(cd);
+    return { filename: m ? m[1] : `sharing-${userId}.${format}`, text: await res.text() };
+  },
+  sharingBans: () => request<SharingBans>("/api/sharing/bans"),
+  sharingBan: (userId: number) =>
+    request<SharingBanResult>(`/api/sharing/users/${userId}/ban`, { method: "POST" }),
+  sharingUnban: (userId: number) =>
+    request<SharingBanResult>(`/api/sharing/users/${userId}/unban`, { method: "POST" }),
   sharingSettings: () => request<SharingConfig>("/api/sharing/settings"),
   sharingUpdate: (body: SharingConfigUpdate) =>
     request<SharingConfig>("/api/sharing/settings", {
@@ -180,6 +202,20 @@ export const api = {
     }),
   subwatchTelegramTest: () =>
     request<{ sent: boolean }>("/api/subwatch/telegram/test", { method: "POST" }),
+  // proxy: адрес из поля формы для разовой проверки (не сохраняется); без него — сохранённый
+  subwatchCheckProxy: (proxy?: string) =>
+    request<{ ok: boolean; username: string; message: string }>(
+      "/api/subwatch/telegram/check-proxy",
+      {
+        method: "POST",
+        ...(proxy !== undefined ? { body: JSON.stringify({ proxy }) } : {}),
+      },
+    ),
+  subwatchDetectChat: (proxy?: string) =>
+    request<{ chats: DetectedChat[]; hint: string | null }>("/api/subwatch/detect-chat", {
+      method: "POST",
+      ...(proxy !== undefined ? { body: JSON.stringify({ proxy }) } : {}),
+    }),
 
   ycwatchStatus: () => request<YcwatchStatus>("/api/ycwatch/status"),
   ycwatchCheck: () => request<YcwatchStatus>("/api/ycwatch/check", { method: "POST" }),
@@ -188,6 +224,16 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
+
+  fleetReportStatus: () => request<FleetReportStatus>("/api/fleet-report/status"),
+  fleetReportUpdate: (payload: FleetReportUpdate) =>
+    request<FleetReportStatus>("/api/fleet-report/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  fleetReportPreview: (kind: "full" | "short") =>
+    request<{ text: string }>(`/api/fleet-report/preview?kind=${kind}`, { method: "POST" }),
+  fleetReportSend: () => request<FleetReportStatus>("/api/fleet-report/send", { method: "POST" }),
 
   aiAccessStatus: () => request<AiAccessStatus>("/api/ai-access/status"),
   /** Без ключей — весь парк; с ключами — только эти хосты (встают в очередь идущего прогона). */
@@ -222,6 +268,20 @@ export const api = {
     }),
   nodeWatchTelegramTest: () =>
     request<{ sent: boolean }>("/api/node-watch/telegram/test", { method: "POST" }),
+
+  memWatchStatus: () => request<MemWatchStatus>("/api/mem-watch/status"),
+  memWatchUpdate: (payload: MemWatchUpdate) =>
+    request<MemWatchStatus>("/api/mem-watch/settings", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  memWatchRestart: (nodeId: string) =>
+    request<{ ok: boolean; message?: string }>(`/api/mem-watch/nodes/${nodeId}/restart`, {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+    }),
+  memWatchResetBlock: (nodeId: string) =>
+    request<{ reset: boolean }>(`/api/mem-watch/nodes/${nodeId}/reset-block`, { method: "POST" }),
 
   panelBackupStatus: () => request<PanelBackupStatus>("/api/panel-backup/status"),
   panelBackupRun: () => request<PanelBackupStatus>("/api/panel-backup/run", { method: "POST" }),
@@ -822,6 +882,15 @@ export type SubwatchConfig = {
   notify: boolean;
   chat_id: string;
   bot_token_set: boolean;
+  proxy_set: boolean;
+  proxy_masked: string;
+};
+
+export type DetectedChat = {
+  id: number;
+  type: string;
+  title: string | null;
+  username: string | null;
 };
 
 export type SubwatchStatus = {
@@ -835,7 +904,10 @@ export type SubwatchStatus = {
 };
 
 export type SubwatchUpdate = Partial<
-  Omit<SubwatchConfig, "bot_token_set"> & { bot_token: string }
+  Omit<SubwatchConfig, "bot_token_set" | "proxy_set" | "proxy_masked"> & {
+    bot_token: string;
+    telegram_proxy: string;
+  }
 >;
 
 export type YcVm = {
@@ -1148,3 +1220,111 @@ export type AiHostHistory = {
   days: number;
   points: AiHistoryPoint[];
 };
+
+
+export type MemWatchConfig = {
+  enabled: boolean;
+  dry_run: boolean;
+  auto_restart: boolean;
+  notify: boolean;
+  chat_id: string;
+  rss_min_mb: number;
+  rss_pct: number;
+  avail_pct: number;
+  swap_pct: number;
+  critical_avail_pct: number;
+  oom_window_min: number;
+  confirm_ticks: number;
+  clear_ticks: number;
+  remind_hours: number;
+  cooldown_h: number;
+  min_core_uptime_h: number;
+  max_per_node_24h: number;
+  max_per_node_7d: number;
+  fleet_gap_min: number;
+  fleet_per_hour: number;
+  window_start: number;
+  window_end: number;
+  utc_offset: number;
+  post_check_after_s: number;
+  post_check_deadline_s: number;
+  relapse_h: number;
+  exclude: string[];
+  exclude_contains: string[];
+  bot_ready: boolean;
+};
+
+export type MemWatchNode = {
+  node_id: string;
+  name: string;
+  host: string;
+  checked_at: string | null;
+  rss_mb: number | null;
+  rss_source: string | null;
+  rss_limit_mb: number | null;
+  mem_total_mb: number | null;
+  avail_pct: number | null;
+  swap_percent: number | null;
+  core_uptime_s: number | null;
+  kinds: string[];
+  reasons: string[];
+  alarm: boolean;
+  critical: boolean;
+  alarm_since: string | null;
+  action: string;
+  action_reason: string;
+  blocked: string | null;
+  pending: boolean;
+  last_restart_at: string | null;
+  excluded: boolean;
+};
+
+export type MemWatchLogRow = {
+  ts: string;
+  kind: string;
+  node_id?: string | null;
+  name?: string | null;
+  text: string;
+  dry_run: boolean;
+  notified: boolean;
+};
+
+export type MemWatchStatus = {
+  config: MemWatchConfig;
+  nodes: MemWatchNode[];
+  log: MemWatchLogRow[];
+  alarms: number;
+};
+
+export type MemWatchUpdate = Partial<Omit<MemWatchConfig, "bot_ready">>;
+
+export type FleetReportConfig = {
+  enabled: boolean;
+  commands: boolean;
+  chat_id: string;
+  full_hours: string;
+  short_hours: string;
+  utc_offset: number;
+  window_days: number;
+  mem_red_p95: number;
+  red_days: number;
+  mem_orange_p95: number;
+  orange_days: number;
+  trend_pp: number;
+  chan_pct: number;
+  chan_days: number;
+  save_mem_pct: number;
+  save_cpu_pct: number;
+  save_min_gb: number;
+  headroom_pct: number;
+};
+
+export type FleetReportStatus = {
+  config: FleetReportConfig;
+  bot_ready: boolean;
+  last_sent_at: string | null;
+  last_kind: string | null;
+  next_report: string | null;
+};
+
+export type FleetReportUpdate = Partial<FleetReportConfig>;

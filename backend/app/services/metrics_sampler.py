@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.db import SessionLocal
 from app.models import Node
-from app.services import node_watch
+from app.services import mem_watch, node_watch
 from app.services.agent_metrics import answered_now, fetch_agent_status, is_token_mismatch
 from app.services.counter_delta import CounterSnapshot, CounterTracker
 from app.services.crypto import decrypt_secret
@@ -96,6 +96,7 @@ async def sample_once() -> int:
             agents[nid] = st
 
         rows = []
+        deltas_by_node: dict[str, dict] = {}
         for node in nodes:
             nid = str(node.id)
             ag = agents.get(nid)
@@ -112,6 +113,7 @@ async def sample_once() -> int:
             ru_ms = getattr(ag, "ru_ping_ms", None) if ag is not None else None
             ru_loss = getattr(ag, "ru_loss_pct", None) if ag is not None else None
             deltas = _counters.update(nid, _snapshot(ag))
+            deltas_by_node[nid] = deltas
             rows.append(
                 {
                     "node_id": uuid.UUID(nid),
@@ -128,6 +130,7 @@ async def sample_once() -> int:
                     "swap_percent": swap if present else None,
                     "ru_ping_ms": ru_ms if present else None,
                     "ru_loss_pct": ru_loss if present else None,
+                    "xray_rss_mb": getattr(ag, "xray_rss_mb", None) if present else None,
                 }
             )
         written = await insert_samples(db, rows)
@@ -140,6 +143,14 @@ async def sample_once() -> int:
                 panel, panel_ok)
         except Exception:
             log.exception("node watch failed")
+            await db.rollback()
+
+        # Памятьсторож: тоже после записи и в своём try — его сбой графикам не мешает.
+        try:
+            answered_map = {str(n.id): _answered(n, agents.get(str(n.id))) for n in nodes}
+            await mem_watch.observe(db, nodes, agents, answered_map, panel, deltas_by_node)
+        except Exception:
+            log.exception("mem watch failed")
             await db.rollback()
         return written
 

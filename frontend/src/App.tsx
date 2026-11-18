@@ -6,6 +6,7 @@ import { AiAccessPage } from "./pages/AiAccessPage";
 import { AutomationPage } from "./pages/AutomationPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { HostingsPage } from "./pages/HostingsPage";
+import { MemoryPage } from "./pages/MemoryPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NodesPage } from "./pages/NodesPage";
 import { ScriptsPage } from "./pages/ScriptsPage";
@@ -70,6 +71,7 @@ export default function App() {
           <Route path="settings" element={<SettingsPage />} />
           <Route path="hostings" element={<HostingsPage />} />
           <Route path="ai-access" element={<AiAccessPage />} />
+          <Route path="memory" element={<MemoryPage />} />
           <Route path="sharing" element={<SharingPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

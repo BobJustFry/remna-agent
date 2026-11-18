@@ -31,6 +31,9 @@ import {
 import { DownSince } from "./DownSince";
 import { OnlineBadge } from "./OnlineBadge";
 import { SharedBadge } from "./SharedBadge";
+import { MemBadge, MemRestartButton } from "./MemBadge";
+import { useMemWatch } from "../hooks/useMemWatch";
+import type { MemWatchNode } from "../api/client";
 import { useSharingStatus } from "../hooks/useSharingStatus";
 
 const PING = "#22d3bb";
@@ -129,6 +132,8 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses, xrayOnline, no
   const [openId, setOpenId] = useState<string | null>(null);
   const [range, setRange] = useState<MetricsRange>("day");
   const sharing = useSharingStatus();
+  const mem = useMemWatch();
+  const memByNode = Object.fromEntries((mem.status?.nodes ?? []).map((m) => [m.node_id, m]));
 
   const load = useCallback(async () => {
     try {
@@ -167,6 +172,7 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses, xrayOnline, no
           inboundIps={inboundPeerCount(agentStatuses[node.id], sharing, node.id)}
           inboundFromXray={inboundPeerFromXray(agentStatuses[node.id], sharing, node.id)}
           sharingHits={sharing?.by_agent_id[node.id] ?? []}
+          memNode={memByNode[node.id]}
           onOpen={() => setOpenId(node.id)}
         />
       ))}
@@ -222,6 +228,8 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses, xrayOnline, no
           dayPoints={series[openNode.id] ?? []}
           dayFromTs={fromTs}
           dayToTs={toTs}
+          memNode={memByNode[openNode.id]}
+          onReload={() => void mem.refresh()}
           onClose={() => setOpenId(null)}
         />
       )}
@@ -241,6 +249,7 @@ function NodeTile({
   inboundIps,
   inboundFromXray,
   sharingHits,
+  memNode,
   onOpen,
 }: {
   node: NodeItem;
@@ -254,6 +263,7 @@ function NodeTile({
   inboundIps: number | null;
   inboundFromXray: boolean;
   sharingHits: SharingUserHit[];
+  memNode?: MemWatchNode;
   onOpen: () => void;
 }) {
   const cpuLive = agent?.present ? agent.cpu_percent : null;
@@ -295,6 +305,7 @@ function NodeTile({
           {node.name}
         </div>
         <SharedBadge nodeId={node.id} hits={sharingHits} compact />
+        <MemBadge info={memNode} compact />
         <DownSince down={down} compact />
         <OnlineBadge status={status} compact />
       </div>
@@ -540,6 +551,8 @@ function NodeMetricModal({
   dayPoints,
   dayFromTs,
   dayToTs,
+  memNode,
+  onReload,
   onClose,
 }: {
   node: NodeItem;
@@ -550,6 +563,8 @@ function NodeMetricModal({
   dayPoints: MetricPoint[];
   dayFromTs: number;
   dayToTs: number;
+  memNode?: MemWatchNode;
+  onReload?: () => void;
   onClose: () => void;
 }) {
   const [range, setRange] = useState<MetricsRange>("day");
@@ -644,7 +659,14 @@ function NodeMetricModal({
           <h2 className="text-base font-semibold text-[var(--text)]">{node.name}</h2>
           <span className="font-mono text-xs text-[var(--muted)]">{node.host}</span>
           <OnlineBadge status={status} />
+          <MemBadge info={memNode} />
           <div className="ml-auto flex flex-wrap items-center gap-1">
+            <MemRestartButton
+              nodeId={node.id}
+              nodeName={node.name}
+              rssMb={agent?.present ? agent.xray_rss_mb ?? null : null}
+              onDone={onReload}
+            />
             {PERIODS.map((p) => (
               <button
                 key={p.id}
@@ -761,6 +783,24 @@ function NodeMetricModal({
                 agent?.present && agent.swap_total_mb === 0
                   ? "нет"
                   : fmtPct(agent?.present ? agent.swap_percent ?? null : null)
+              }
+            />
+            <Fact
+              label="RSS ядра"
+              value={
+                agent?.present && agent.xray_rss_mb != null
+                  ? `${Math.round(agent.xray_rss_mb)} МБ`
+                  : "—"
+              }
+              valueClass={
+                memNode?.alarm && memNode.kinds.includes("rss")
+                  ? "font-bold tabular-nums text-[var(--danger)]"
+                  : undefined
+              }
+              title={
+                memNode?.rss_limit_mb != null
+                  ? `Порог тревоги ${Math.round(memNode.rss_limit_mb)} МБ. «—» — агент старше 0.1.23 или ядра нет`
+                  : "RSS процесса rw-core. «—» — агент старше 0.1.23 или ядра нет"
               }
             />
             <Fact
@@ -908,6 +948,17 @@ function NodeMetricModal({
                 color={SWAP}
                 unit="%"
                 maxY={100}
+              />
+            </ChartBlock>
+            <ChartBlock
+              title={`RSS ядра${memNode?.rss_limit_mb != null ? ` · порог ${Math.round(memNode.rss_limit_mb)}` : ""}`}
+              unit="МБ"
+            >
+              <NodeMetricLineChart
+                {...chart}
+                values={points.map((p) => p.xray_rss_mb ?? null)}
+                color={SWAP}
+                unit="МБ"
               />
             </ChartBlock>
             <div className="sm:col-span-2">

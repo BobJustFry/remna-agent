@@ -118,6 +118,8 @@ class NodeMetricSample(Base):
     # Пинг и потери до якорей RIPE Atlas в Москве, как их видит сама нода.
     ru_ping_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     ru_loss_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # RSS процесса ядра (rw-core/xray), МБ, с агента 0.1.23. Null — старый агент или ядра нет.
+    xray_rss_mb: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     node: Mapped["Node"] = relationship(back_populates="metric_samples")
 
@@ -325,3 +327,46 @@ class SharingActivity(Base):
         DateTime(timezone=True), primary_key=True, index=True
     )
     seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+
+class IpGeoCache(Base):
+    """Кеш геоданных по клиентским адресам: оператор, город, мобильный/проводной.
+
+    Нужен только отчёту о шаринге. Заполняется пачкой не чаще раза в минуту
+    (см. ip_geo), на каждый скан не ходим. Пустые поля — «не определено».
+    """
+
+    __tablename__ = "ip_geo_cache"
+
+    ip: Mapped[str] = mapped_column(String(45), primary_key=True)
+    asn: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    isp: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    country: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mobile: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    hosting: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Ответ источника был успешным; ложь — попробуем снова через сутки.
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class FleetReportLog(Base):
+    """Отчёты о нагрузке парка, отправленные в Telegram (слот, вид, текст)."""
+
+    __tablename__ = "fleet_report_log"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+    slot: Mapped[str] = mapped_column(String(16), nullable=False)
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)   # full | short | manual
+    delivered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)

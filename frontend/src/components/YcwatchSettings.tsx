@@ -1,269 +1,188 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, type YcwatchStatus } from "../api/client";
+import { useSettingsBlock } from "./settings/SaveContext";
+import { Advanced, BTN, Card, Grid, NumField, StatusToggle, TextField, Toggle, useDraft } from "./settings/ui";
 
-const INPUT =
-  "w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--text)] outline-none focus:border-[var(--accent)]";
-const BTN =
-  "rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--text)] hover:bg-[var(--bg-row)] disabled:opacity-50";
-
-/** Настройка следилки за Yandex Cloud: баланс облака и ВМ страницы подписки. */
+/** Следилка за Yandex Cloud: баланс облака и ВМ страницы подписки. Чат — на вкладке «Уведомления». */
 export function YcwatchSettings() {
   const [status, setStatus] = useState<YcwatchStatus | null>(null);
-  const [billing, setBilling] = useState("");
-  const [folder, setFolder] = useState("");
-  const [instance, setInstance] = useState("");
-  const [warnRub, setWarnRub] = useState(300);
-  const [interval, setIntervalMin] = useState(60);
-  const [remindMin, setRemindMin] = useState(60);
-  const [remindLowHours, setRemindLowHours] = useState(24);
-  const [chatId, setChatId] = useState("");
-  const [saKey, setSaKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-
-  function apply(s: YcwatchStatus) {
-    setStatus(s);
-    setBilling(s.config.billing_account_id);
-    setFolder(s.config.folder_id);
-    setInstance(s.config.instance_id);
-    setWarnRub(s.config.warn_rub);
-    setIntervalMin(s.config.interval_min);
-    setRemindMin(s.config.remind_min);
-    setRemindLowHours(s.config.remind_low_hours);
-    setChatId(s.config.chat_id);
-    setSaKey("");
-  }
 
   useEffect(() => {
-    api.ycwatchStatus().then(apply).catch(() => undefined);
+    api.ycwatchStatus().then(setStatus).catch(() => undefined);
   }, []);
 
-  async function patch(payload: Parameters<typeof api.ycwatchUpdate>[0], note?: string) {
-    setBusy(true);
-    setMsg(null);
-    try {
-      apply(await api.ycwatchUpdate(payload));
-      if (note) setMsg(note);
-    } catch (err) {
-      setMsg(err instanceof Error ? err.message : "Не удалось сохранить");
-    } finally {
-      setBusy(false);
-    }
-  }
+  const saved = useMemo(
+    () =>
+      status
+        ? {
+            enabled: status.config.enabled,
+            notify: status.config.notify,
+            billing_account_id: status.config.billing_account_id,
+            folder_id: status.config.folder_id,
+            instance_id: status.config.instance_id,
+            warn_rub: status.config.warn_rub,
+            interval_min: status.config.interval_min,
+            remind_min: status.config.remind_min,
+            remind_low_hours: status.config.remind_low_hours,
+            sa_key: "",
+            sa_erase: false,
+          }
+        : null,
+    [status],
+  );
+  const { draft, set, changed, dirty, reset } = useDraft(saved);
 
-  if (!status) return null;
+  useSettingsBlock("ycwatch", {
+    label: "Облако",
+    tab: "cloud",
+    dirty,
+    reset,
+    save: async () => {
+      const { sa_key, sa_erase, ...rest } = changed;
+      const payload: Parameters<typeof api.ycwatchUpdate>[0] = { ...rest };
+      for (const k of ["billing_account_id", "folder_id", "instance_id"] as const) {
+        const v = payload[k];
+        if (typeof v === "string") payload[k] = v.trim();
+      }
+      if (sa_erase) payload.sa_key = "";
+      else if (typeof sa_key === "string" && sa_key.trim()) payload.sa_key = sa_key.trim();
+      setStatus(await api.ycwatchUpdate(payload));
+      set("sa_key", "");
+      set("sa_erase", false);
+    },
+  });
+
+  if (!status || !draft) return <p className="text-sm text-[var(--muted)]">Загрузка…</p>;
   const cfg = status.config;
 
   return (
-    <section className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-elevated)] p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h2 className="text-sm font-semibold">Следилка за Yandex Cloud</h2>
-          <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
-            Раз в час смотрит баланс платёжного аккаунта и статус ВМ страницы подписки. Кончатся
-            деньги — Яндекс остановит ВМ, и подписка ляжет (так было 01.10). Предупреждает, когда
-            баланс ниже порога; тревога — при нуле/минусе или если ВМ не RUNNING; отдельно — если
-            облако несколько раз подряд не отвечает (истёк ключ, сняли роль). Только чтение: ВМ не
-            запускает и биллинг не трогает.
-          </p>
+    <Card
+      title="Следилка за Yandex Cloud"
+      right={<StatusToggle checked={draft.enabled} onChange={(v) => set("enabled", v)} />}
+    >
+      <p className="text-xs text-[var(--muted)]">
+        Смотрит баланс облака и статус ВМ страницы подписки.
+        <span className="ml-1 text-[var(--text)]">
+          Тревога при нуле/минусе баланса или если ВМ не RUNNING.
+        </span>
+      </p>
+      <Grid>
+        <NumField
+          label="Предупреждать ниже, ₽"
+          value={draft.warn_rub}
+          min={0}
+          onChange={(v) => set("warn_rub", v)}
+        />
+        <div className="self-end pb-2">
+          <Toggle checked={draft.notify} onChange={(v) => set("notify", v)} label="Уведомлять в Telegram" />
         </div>
-        <label className="flex shrink-0 items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={cfg.enabled}
-            disabled={busy}
-            onChange={(e) =>
-              void patch({ enabled: e.target.checked }, e.target.checked ? "Включено" : "Выключено")
-            }
-            className="h-4 w-4 accent-[var(--accent)]"
-          />
-          <span className={cfg.enabled ? "text-[var(--success)]" : "text-[var(--muted)]"}>
-            {cfg.enabled ? "включена" : "выключена"}
-          </span>
-        </label>
-      </div>
+      </Grid>
+      <p className="text-xs text-[var(--muted)]">
+        {cfg.bot_ready ? "" : "Бот пока не настроен — сообщения не уходят. "}
+        Чат и бот — на вкладке «Уведомления».
+      </p>
 
-      <div className="mt-4 space-y-3">
-        <div className="flex flex-wrap gap-3">
-          <label className="min-w-40 flex-1">
-            <span className="text-xs text-[var(--muted)]">Платёжный аккаунт (id)</span>
-            <input
-              value={billing}
-              onChange={(e) => setBilling(e.target.value)}
-              spellCheck={false}
-              className={`mt-1 font-mono ${INPUT}`}
-            />
-          </label>
-          <label className="min-w-40 flex-1">
-            <span className="text-xs text-[var(--muted)]">Каталог с ВМ (folderId)</span>
-            <input
-              value={folder}
-              onChange={(e) => setFolder(e.target.value)}
-              spellCheck={false}
-              className={`mt-1 font-mono ${INPUT}`}
-            />
-          </label>
-          <label className="min-w-40 flex-1">
-            <span className="text-xs text-[var(--muted)]">id ВМ — пусто: все ВМ каталога</span>
-            <input
-              value={instance}
-              onChange={(e) => setInstance(e.target.value)}
-              spellCheck={false}
-              className={`mt-1 font-mono ${INPUT}`}
-            />
-          </label>
-        </div>
-
-        <div className="flex flex-wrap gap-3">
-          <label className="min-w-32 flex-1">
-            <span className="text-xs text-[var(--muted)]">Предупреждать ниже, ₽</span>
-            <input
-              type="number"
-              min={0}
-              value={warnRub}
-              onChange={(e) => setWarnRub(Number(e.target.value))}
-              className={`mt-1 ${INPUT}`}
-            />
-          </label>
-          <label className="min-w-32 flex-1">
-            <span className="text-xs text-[var(--muted)]">Опрашивать раз в, минут</span>
-            <input
-              type="number"
-              min={5}
-              max={1440}
-              value={interval}
-              onChange={(e) => setIntervalMin(Number(e.target.value))}
-              className={`mt-1 ${INPUT}`}
-            />
-          </label>
-          <label className="min-w-32 flex-1">
-            <span className="text-xs text-[var(--muted)]">Авария: напоминать раз в, мин (0 — нет)</span>
-            <input
-              type="number"
-              min={0}
-              max={1440}
-              value={remindMin}
-              onChange={(e) => setRemindMin(Number(e.target.value))}
-              className={`mt-1 ${INPUT}`}
-            />
-          </label>
-          <label className="min-w-32 flex-1">
-            <span className="text-xs text-[var(--muted)]">Мало денег / не отвечает: раз в, ч (0 — нет)</span>
-            <input
-              type="number"
-              min={0}
-              max={168}
-              value={remindLowHours}
-              onChange={(e) => setRemindLowHours(Number(e.target.value))}
-              className={`mt-1 ${INPUT}`}
-            />
-          </label>
-        </div>
-
-        <label className="block">
-          <span className="text-xs text-[var(--muted)]">
-            id чата — пусто: тот же, что у следилки за подпиской
-            {cfg.bot_ready ? "" : " (бот пока не настроен — сообщения не уходят)"}
-          </span>
-          <input
-            value={chatId}
-            onChange={(e) => setChatId(e.target.value)}
-            spellCheck={false}
-            placeholder="-1001234567890"
-            className={`mt-1 font-mono ${INPUT}`}
-          />
-        </label>
-
-        <label className="flex items-center gap-2 text-xs text-[var(--muted)]">
-          <input
-            type="checkbox"
-            checked={cfg.notify}
-            disabled={busy}
-            onChange={(e) => void patch({ notify: e.target.checked })}
-            className="h-4 w-4 accent-[var(--accent)]"
-          />
-          слать в Telegram
-        </label>
-
-        <button
-          type="button"
-          disabled={busy}
-          className={BTN}
-          onClick={() =>
-            void patch(
-              {
-                billing_account_id: billing.trim(),
-                folder_id: folder.trim(),
-                instance_id: instance.trim(),
-                warn_rub: warnRub,
-                interval_min: interval,
-                remind_min: remindMin,
-                remind_low_hours: remindLowHours,
-                chat_id: chatId.trim(),
-              },
-              "Сохранено",
-            )
-          }
-        >
-          Сохранить
-        </button>
-      </div>
-
-      <div className="mt-5 border-t border-[var(--border)] pt-4">
-        <h3 className="text-sm font-semibold">Ключ сервисного аккаунта</h3>
-        <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
-          Authorized key (JSON) узкого СА с ролями compute.viewer и billing.accounts.viewer. Хранится
-          зашифрованным и обратно не показывается.{" "}
+      <div className="rounded-lg border border-[var(--border)] p-3">
+        <div className="text-xs font-semibold">Ключ сервисного аккаунта</div>
+        <p className="mt-1 text-xs text-[var(--muted)]">
           {cfg.sa_key_set ? (
             <>
-              Сейчас стоит ключ <code className="font-mono">{cfg.sa_key_id}</code> СА{" "}
+              Стоит ключ <code className="font-mono">{cfg.sa_key_id}</code> СА{" "}
               <code className="font-mono">{cfg.sa_id}</code>.
             </>
           ) : cfg.sa_key_broken ? (
             <span className="text-[var(--danger)]">
-              Ключ в базе есть, но не расшифровывается — похоже, сменился ключ шифрования. Облако мы
-              не видим; вставьте ключ заново.
+              Ключ в базе не расшифровывается (сменился ключ шифрования) — вставьте заново.
             </span>
           ) : (
             "Ключ не задан — следилка ждёт."
           )}
         </p>
         <textarea
-          value={saKey}
-          onChange={(e) => setSaKey(e.target.value)}
+          value={draft.sa_key}
+          onChange={(e) => {
+            set("sa_key", e.target.value);
+            if (e.target.value) set("sa_erase", false);
+          }}
           spellCheck={false}
           autoComplete="off"
           rows={3}
-          placeholder={cfg.sa_key_set ? "вставьте новый JSON, чтобы заменить" : "{ \"id\": …, \"service_account_id\": …, \"private_key\": … }"}
-          className={`mt-2 font-mono text-xs ${INPUT}`}
+          disabled={draft.sa_erase}
+          placeholder={
+            cfg.sa_key_set
+              ? "вставьте новый JSON, чтобы заменить"
+              : '{ "id": …, "service_account_id": …, "private_key": … }'
+          }
+          className="mt-2 w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 font-mono text-xs text-[var(--text)] outline-none focus:border-[var(--accent)] disabled:opacity-50"
         />
-        <div className="mt-2 flex flex-wrap gap-2">
-          <button
-            type="button"
-            disabled={busy || !saKey.trim()}
-            className={BTN}
-            onClick={() => void patch({ sa_key: saKey.trim() }, "Ключ сохранён")}
-          >
-            Сохранить ключ
-          </button>
-          {cfg.sa_key_set && (
+        {cfg.sa_key_set && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <button
               type="button"
-              disabled={busy}
               className={BTN}
               onClick={() => {
-                if (window.confirm("Стереть ключ? Следилка перестанет опрашивать облако.")) {
-                  void patch({ sa_key: "" }, "Ключ стёрт");
-                }
+                set("sa_erase", !draft.sa_erase);
+                set("sa_key", "");
               }}
             >
-              Стереть
+              {draft.sa_erase ? "Не стирать ключ" : "Стереть ключ"}
             </button>
-          )}
-        </div>
+            {draft.sa_erase && (
+              <span className="text-xs text-[var(--warning)]">
+                Ключ будет стёрт при сохранении — следилка перестанет опрашивать облако.
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
-      {msg && <p className="mt-3 text-xs text-[var(--muted)]">{msg}</p>}
-    </section>
+      <Advanced title="Дополнительно">
+        <Grid>
+          <TextField
+            label="Платёжный аккаунт (id)"
+            value={draft.billing_account_id}
+            onChange={(v) => set("billing_account_id", v)}
+          />
+          <TextField
+            label="Каталог с ВМ (folderId)"
+            value={draft.folder_id}
+            onChange={(v) => set("folder_id", v)}
+          />
+          <TextField
+            label="id ВМ"
+            hint="Пусто — следим за всеми ВМ каталога."
+            value={draft.instance_id}
+            onChange={(v) => set("instance_id", v)}
+          />
+          <NumField
+            label="Опрашивать раз в, минут"
+            value={draft.interval_min}
+            min={5}
+            max={1440}
+            onChange={(v) => set("interval_min", v)}
+          />
+          <NumField
+            label="Авария: напоминать раз в, мин"
+            hint="0 — не напоминать."
+            value={draft.remind_min}
+            min={0}
+            max={1440}
+            onChange={(v) => set("remind_min", v)}
+          />
+          <NumField
+            label="Мало денег / не отвечает: раз в, ч"
+            hint="0 — не напоминать."
+            value={draft.remind_low_hours}
+            min={0}
+            max={168}
+            onChange={(v) => set("remind_low_hours", v)}
+          />
+        </Grid>
+        <p className="text-xs text-[var(--muted)]">
+          Только чтение: ВМ не запускает, биллинг не трогает. Ключ — authorized key узкого СА с ролями
+          compute.viewer и billing.accounts.viewer, хранится зашифрованным.
+        </p>
+      </Advanced>
+    </Card>
   );
 }

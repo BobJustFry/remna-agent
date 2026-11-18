@@ -72,6 +72,13 @@ class AgentStatus:
     # ретрансмитов без повторов SYN и на сегмент с данными, а не на все OutSegs.
     tcp_syn_retrans_total: int | None = None
     tcp_orig_data_sent_total: int | None = None
+    # С агента 0.1.23: память для памятьсторожа. RSS/возраст процесса ядра —
+    # None, если агент старый или ядра на ноде нет.
+    mem_total_mb: float | None = None
+    mem_available_mb: float | None = None
+    swap_used_mb: float | None = None
+    xray_rss_mb: float | None = None
+    xray_age_sec: int | None = None
     error: str | None = None
 
 
@@ -254,6 +261,11 @@ async def _probe_once(
             boot_id=_as_str(data.get("boot_id")),
             tcp_syn_retrans_total=_as_int(data.get("tcp_syn_retrans_total")),
             tcp_orig_data_sent_total=_as_int(data.get("tcp_orig_data_sent_total")),
+            mem_total_mb=_as_float(data.get("mem_total_mb")),
+            mem_available_mb=_as_float(data.get("mem_available_mb")),
+            swap_used_mb=_as_float(data.get("swap_used_mb")),
+            xray_rss_mb=_as_float(data.get("xray_rss_mb")),
+            xray_age_sec=_as_int(data.get("xray_age_sec")),
             error=None,
         )
 
