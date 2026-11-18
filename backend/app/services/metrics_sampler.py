@@ -24,6 +24,10 @@ _PRUNE_EVERY = 40
 _counters = CounterTracker()
 
 
+def forget_node_counters(node_id: str) -> None:
+    _counters.forget(node_id)
+
+
 def _snapshot(ag: object | None) -> CounterSnapshot | None:
     if ag is None or not getattr(ag, "present", False):
         return None
@@ -53,12 +57,19 @@ def _answered(node: Node, ag: object | None) -> tuple[bool | None, str | None]:
 
 
 async def sample_once() -> int:
+    from app.services.monitoring_gate import monitoring_lock
+    async with monitoring_lock:
+        return await _sample_once()
+
+
+async def _sample_once() -> int:
     async with SessionLocal() as db:
         # Хостер нужен следилке за нодами: он идёт в текст тревоги.
         result = await db.execute(select(Node).options(selectinload(Node.hosting)))
         nodes = list(result.scalars().all())
         if not nodes:
             return 0
+        active_nodes = [n for n in nodes if n.monitoring_enabled]
 
         async def one_agent(node: Node) -> tuple[str, object]:
             token = decrypt_secret(node.agent_token_enc) if node.agent_token_enc else None
@@ -76,7 +87,7 @@ async def sample_once() -> int:
         from app.services.remnawave_api import rw_configured, rw_fleet, users_online
 
         online_task = asyncio.to_thread(rw_fleet)
-        agent_pairs = await asyncio.gather(*(one_agent(n) for n in nodes), return_exceptions=True)
+        agent_pairs = await asyncio.gather(*(one_agent(n) for n in active_nodes), return_exceptions=True)
         try:
             answer = await online_task
         except Exception:
@@ -97,7 +108,7 @@ async def sample_once() -> int:
 
         rows = []
         deltas_by_node: dict[str, dict] = {}
-        for node in nodes:
+        for node in active_nodes:
             nid = str(node.id)
             ag = agents.get(nid)
             cpu = getattr(ag, "cpu_percent", None) if ag is not None else None

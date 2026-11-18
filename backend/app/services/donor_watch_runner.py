@@ -106,7 +106,7 @@ async def _agent_nodes_by_ip(db) -> dict:
     """Ноды рагента по IP. DNS — в потоке, чтобы не стопорить цикл событий."""
     from app.models import Node
 
-    rows = (await db.execute(select(Node))).scalars().all()
+    rows = (await db.execute(select(Node).where(Node.monitoring_enabled.is_(True)))).scalars().all()
     hosts = [n.host for n in rows]
     ips = await asyncio.to_thread(lambda: [_resolve(h) for h in hosts])
     by_ip: dict = {}
@@ -114,6 +114,13 @@ async def _agent_nodes_by_ip(db) -> dict:
         if ip:
             by_ip.setdefault(ip, n)
     return by_ip
+
+
+async def _disabled_node_addresses(db) -> set[str]:
+    from app.models import Node
+    hosts = list((await db.execute(select(Node.host).where(Node.monitoring_enabled.is_(False)))).scalars().all())
+    resolved = await asyncio.to_thread(lambda: [_resolve(host) for host in hosts])
+    return set(hosts) | {ip for ip in resolved if ip}
 
 
 # ── прыжки ──────────────────────────────────────────────────────────────────
@@ -207,14 +214,28 @@ async def _probe_donor(reg, st, cfg, key, services, hops, gemini_key) -> tuple[d
     return res, used
 
 
+async def _guarded_probe(db, reg, st, cfg, key, services, hops, gemini_key):
+    from app.services.monitoring_gate import monitoring_lock
+    async with monitoring_lock:
+        disabled = await _disabled_node_addresses(db)
+        if reg.donors[key].address in disabled:
+            return None, None
+        hops = [hop for hop in hops if hop is not None and hop.host not in disabled]
+        return await _probe_donor(reg, st, cfg, key, services, hops, gemini_key)
+
+
 # ── фаервол доноров ─────────────────────────────────────────────────────────
 
 async def _check_allowlists(db, reg: dw.Registry, st: dict, cfg: dict, now: datetime) -> None:
     from app.services.crypto import decrypt_secret
+    from app.services.monitoring_gate import monitoring_lock
 
     by_ip = await _agent_nodes_by_ip(db)
+    disabled = await _disabled_node_addresses(db)
     every = timedelta(hours=cfg["allowlist_every_h"])
     for key, d in reg.donors.items():
+        if d.address in disabled:
+            continue
         if d.retired or not (d.used_by or d.in_registry):
             continue
         dst = st["donors"].setdefault(key, {"svc": {}})
@@ -232,7 +253,10 @@ async def _check_allowlists(db, reg: dw.Registry, st: dict, cfg: dict, now: date
                          auth_type=node.auth_type,
                          password=decrypt_secret(node.password_enc) if node.password_enc else None,
                          private_key=decrypt_secret(node.private_key_enc) if node.private_key_enc else None)
-            text = await asyncio.to_thread(dp.read_firewall, hop)
+            async with monitoring_lock:
+                if d.address in await _disabled_node_addresses(db):
+                    continue
+                text = await asyncio.to_thread(dp.read_firewall, hop)
             ips, open_all = dw.parse_firewall(text, d.port)
             dst["allowlist"] = {"checked_at": _iso(now), "ips": sorted(ips) if ips is not None else None,
                                 "open": open_all,
@@ -248,14 +272,14 @@ def _node_snapshot(profile_uuid: str) -> dict[str, dict]:
     out = {}
     for n in _panel_nodes():
         if ((n.get("configProfile") or {}).get("activeConfigProfileUuid")) == profile_uuid:
-            out[n["uuid"]] = {"name": n.get("name"), "connected": n.get("isConnected") is True,
+            out[n["uuid"]] = {"name": n.get("name"), "address": n.get("address"), "connected": n.get("isConnected") is True,
                               "disabled": n.get("isDisabled") is True,
                               "uptime": n.get("xrayUptime") if isinstance(n.get("xrayUptime"), (int, float)) else None}
     return out
 
 
 def _post_check(profile_uuid: str, before: dict[str, dict], deadline_s: int,
-                sleep=time.sleep) -> tuple[bool, str]:
+                sleep=time.sleep, restart=None, monitored=None) -> tuple[bool, str]:
     """Ноды, что были в сети до PATCH, снова в сети и с перезапущенным ядром.
 
     Панель не всегда перезапускает ноду после PATCH профиля (DE, 07.09.2026):
@@ -268,15 +292,20 @@ def _post_check(profile_uuid: str, before: dict[str, dict], deadline_s: int,
     if not need:
         return True, "нод в сети не было — проверять нечего"
     kicked: set[str] = set()
+    skipped: set[str] = set()
     last = {}
     while time.monotonic() - t0 < deadline_s:
         sleep(15)
+        if monitored is not None:
+            need = {u for u in need if monitored(before[u].get("address"))}
+            if not need:
+                return True, "мониторинг нод профиля отключён"
         try:
             last = _node_snapshot(profile_uuid)
         except Exception:  # noqa: BLE001
             continue
         elapsed = time.monotonic() - t0
-        ok = set()
+        ok = set(skipped)
         for u in need:
             n = last.get(u)
             if not n or not n["connected"]:
@@ -288,10 +317,14 @@ def _post_check(profile_uuid: str, before: dict[str, dict], deadline_s: int,
             elif elapsed > 60 and u not in kicked:
                 kicked.add(u)
                 try:
-                    rw_api(f"/api/nodes/{u}/actions/restart", "POST", {"forceRestart": True})
+                    if restart is None:
+                        rw_api(f"/api/nodes/{u}/actions/restart", "POST", {"forceRestart": True})
+                    elif restart(u, before[u].get("address")) is False:
+                        skipped.add(u)
+                        ok.add(u)
                 except Exception:  # noqa: BLE001
                     pass
-        if ok == need:
+        if need <= ok:
             extra = f"; ядро перезапущено вручную на {len(kicked)}" if kicked else ""
             return True, f"ноды профиля в сети ({len(need)}){extra}"
     bad = [before[u]["name"] for u in need if not (last.get(u) or {}).get("connected")]
@@ -387,7 +420,39 @@ async def _finish_pending(db, st: dict, cfg: dict, reg: dw.Registry | None, befo
         for n in before.values():
             n["uptime"] = None
             n["connected"] = not n["disabled"]   # строго: все включённые ноды профиля должны быть в сети
-    ok, msg = await asyncio.to_thread(_post_check, puid, before, cfg["post_check_s"])
+    disabled = await _disabled_node_addresses(db)
+    before = {node_id: item for node_id, item in before.items() if item.get("address") not in disabled}
+    loop = asyncio.get_running_loop()
+
+    async def is_monitored(address):
+        from app.db import SessionLocal
+        async with SessionLocal() as check_db:
+            return address not in await _disabled_node_addresses(check_db)
+
+    async def guarded_restart(node_uuid, address, deadline):
+        from app.db import SessionLocal
+        from app.services.monitoring_gate import monitoring_lock
+        from app.services.remnawave_api import rw_api
+        async with monitoring_lock:
+            if time.monotonic() >= deadline:
+                return None
+            async with SessionLocal() as check_db:
+                if address in await _disabled_node_addresses(check_db):
+                    return False
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.to_thread(rw_api, f"/api/nodes/{node_uuid}/actions/restart", "POST", {"forceRestart": True})
+            return True
+
+    deadline = time.monotonic() + cfg["post_check_s"]
+
+    def restart(node_uuid, address):
+        return asyncio.run_coroutine_threadsafe(guarded_restart(node_uuid, address, deadline), loop).result()
+
+    def monitored(address):
+        return asyncio.run_coroutine_threadsafe(is_monitored(address), loop).result()
+
+    ok, msg = await asyncio.to_thread(_post_check, puid, before, cfg["post_check_s"], restart=restart, monitored=monitored)
     st["pending"] = None
     partial = f"; не записались: {', '.join(c['tag'] for c in untouched + other)}" if (untouched or other) else ""
     if ok and not partial:
@@ -477,6 +542,8 @@ async def run_cycle(db) -> dict:
 
     # 3) пробы: доноры вразнобой, паузы со случайным разбросом
     plan = dw.probe_plan(reg, cfg)
+    disabled = await _disabled_node_addresses(db)
+    plan = {key: services for key, services in plan.items() if reg.donors[key].address not in disabled}
     gemini_key = await ai_access.gemini_key(db) if any("gemini" in v for v in plan.values()) else ""
     by_ip = await _agent_nodes_by_ip(db) if plan else {}
     hops = {k: await _hops_for(db, reg, st, cfg, k, by_ip) for k in plan}
@@ -490,7 +557,9 @@ async def run_cycle(db) -> dict:
     for i, key in enumerate(keys):
         if i:
             await asyncio.sleep(slot * random.uniform(0.5, 1.5))
-        res, hop = await _probe_donor(reg, st, cfg, key, plan[key], hops[key], gemini_key)
+        res, hop = await _guarded_probe(db, reg, st, cfg, key, plan[key], hops[key], gemini_key)
+        if res is None:
+            continue
         first[key], used_hop[key] = res, hop
         summary["probes"] += len(res)
         if any(r in dp.FAIL_RAW for r, _ in res.values()):
@@ -503,7 +572,9 @@ async def run_cycle(db) -> dict:
             await asyncio.sleep(wait)
         svcs = [s for s, (r, _) in first[key].items() if r in dp.FAIL_RAW]
         hop_list = [used_hop[key]] + [h for h in hops[key] if h is not used_hop[key]] if used_hop[key] else hops[key]
-        res, _hop = await _probe_donor(reg, st, cfg, key, svcs, hop_list, gemini_key)
+        res, _hop = await _guarded_probe(db, reg, st, cfg, key, svcs, hop_list, gemini_key)
+        if res is None:
+            continue
         second[key] = res
         summary["rechecks"] += len(res)
 

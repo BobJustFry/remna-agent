@@ -10,6 +10,7 @@ from app.config import settings
 from app.db import SessionLocal
 from app.models import Node
 from app.services import sharing_detect, sharing_watch
+from app.services import monitoring_gate
 
 log = logging.getLogger("remna.sharing")
 
@@ -21,22 +22,29 @@ PRUNE_EVERY = 720
 async def scan_once() -> None:
     if not settings.remnawave_panel_url.strip() or not settings.remnawave_api_token.strip():
         return
+    generation = monitoring_gate.generation
     async with SessionLocal() as db:
         result = await db.execute(select(Node))
-        nodes = [(str(n.id), n.name, n.host) for n in result.scalars().all()]
+        all_nodes = list(result.scalars().all())
+        nodes = [(str(n.id), n.name, n.host) for n in all_nodes if n.monitoring_enabled]
+        disabled_hosts = {n.host for n in all_nodes if not n.monitoring_enabled}
+        own_hosts = {n.host for n in all_nodes}
         cfg = await sharing_watch.get_config(db)
         if not cfg.get("enabled", True):
             return
         profiles = await sharing_watch.profiles(db, cfg)
     try:
-        out = await asyncio.to_thread(sharing_detect.scan_once, nodes, cfg, profiles)
+        out = await asyncio.to_thread(sharing_detect.scan_once, nodes, cfg, profiles, disabled_hosts, own_hosts,
+                                      lambda: monitoring_gate.generation == generation)
     except Exception:
         log.exception("sharing scan failed")
         sharing_detect.mark_error("ошибка скана, смотри лог api")
         return
     if "online_ids" not in out:          # панель не ответила, снимок не обновился
         return
-    async with SessionLocal() as db:
+    async with monitoring_gate.monitoring_lock, SessionLocal() as db:
+        if generation != monitoring_gate.generation:
+            return
         await sharing_watch.record_activity(db, out["online_ids"])
         events = await sharing_watch.handle_scan(db, cfg, out.get("suspects") or [])
         # Автобан после тревог, до коммита: состояние и журнал уходят одной записью.

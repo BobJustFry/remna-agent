@@ -929,7 +929,7 @@ async def observe(db: AsyncSession, nodes: list[Node],
             node_id=nid, name=node.name, host=node.host,
             hosting=node.hosting.name if node.hosting is not None else None,
             agent=answered, agent_error=why, panel=info.get("connected"),
-            muted=nid in excluded or node.host in parked,
+            muted=not getattr(node, "monitoring_enabled", True) or nid in excluded or node.host in parked,
         ))
 
     # В SSH стучимся только там, где агент не ответил (или его нет): по этому

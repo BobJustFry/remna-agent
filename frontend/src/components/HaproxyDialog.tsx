@@ -135,13 +135,13 @@ export function HaproxyDialog({ node, onClose, onBusyChange }: Props) {
   }, [node.id]);
 
   useEffect(() => {
-    if (tab === "config") return;
+    if (tab === "config" || !node.monitoring_enabled) return;
     void loadLive();
     const timer = window.setInterval(() => {
       void loadLive();
     }, 15000);
     return () => window.clearInterval(timer);
-  }, [tab, loadLive]);
+  }, [tab, loadLive, node.monitoring_enabled]);
 
   async function runDiag() {
     if (busy) return;

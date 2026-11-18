@@ -131,7 +131,7 @@ async def _config_out(db: AsyncSession, cfg: dict) -> MemConfigOut:
 async def _status(db: AsyncSession) -> MemStatusOut:
     cfg = await mem_watch.get_config(db)
     state = await mem_watch.get_state(db)
-    rows = (await db.execute(select(Node).order_by(Node.name))).scalars().all()
+    rows = (await db.execute(select(Node).where(Node.monitoring_enabled.is_(True)).order_by(Node.name))).scalars().all()
     out: list[MemNodeOut] = []
     for n in rows:
         st = state["nodes"].get(str(n.id))

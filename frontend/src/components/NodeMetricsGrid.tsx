@@ -154,7 +154,7 @@ export function NodeMetricsGrid({ nodes, statuses, agentStatuses, xrayOnline, no
 
   const openNode = nodes.find((n) => n.id === openId) ?? null;
 
-  const groups = groupByKind(nodes, agentStatuses);
+  const groups = groupByKind(nodes.filter((node) => node.monitoring_enabled), agentStatuses);
 
   const renderTiles = (list: NodeItem[]) => (
     <div className="grid auto-rows-min grid-cols-1 gap-1.5 min-[420px]:grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-7">

@@ -104,6 +104,7 @@ def _to_out(node: Node) -> NodeOut:
         notes=node.notes,
         agent_configured=bool(node.agent_token_enc),
         agent_port=node.agent_port or AGENT_PORT_DEFAULT,
+        monitoring_enabled=node.monitoring_enabled,
         created_at=node.created_at,
         updated_at=node.updated_at,
     )
@@ -155,7 +156,7 @@ async def nodes_online(
     _: str = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> NodesOnlineResponse:
-    result = await db.execute(select(Node.id, Node.host, Node.ssh_port))
+    result = await db.execute(select(Node.id, Node.host, Node.ssh_port).where(Node.monitoring_enabled.is_(True)))
     rows = result.all()
     items = [(str(row.id), row.host, row.ssh_port) for row in rows]
     checked = await check_many(items)
@@ -260,6 +261,10 @@ async def _probe_one_node(
     node: Node, online_by_address: dict[str, int] | None = None
 ) -> tuple[str, AgentNodeStatus]:
     node_id = str(node.id)
+    async with SessionLocal() as check_db:
+        enabled = (await check_db.execute(select(Node.monitoring_enabled).where(Node.id == node.id))).scalar_one_or_none()
+    if not enabled:
+        return node_id, AgentNodeStatus(present=False, configured=bool(node.agent_token_enc), error="Мониторинг отключён")
     token = decrypt_secret(node.agent_token_enc) if node.agent_token_enc else None
     st = await fetch_agent_status(
         host=node.host,
@@ -268,53 +273,65 @@ async def _probe_one_node(
         node_id=node_id,
     )
 
-    if is_token_mismatch(st):
-        now = asyncio.get_running_loop().time()
-        last = _token_sync_last_try.get(node_id, 0.0)
-        if now - last >= _TOKEN_SYNC_COOLDOWN_SEC:
-            _token_sync_last_try[node_id] = now
-            password = decrypt_secret(node.password_enc) if node.password_enc else None
-            private_key = (
-                decrypt_secret(node.private_key_enc) if node.private_key_enc else None
-            )
-            try:
-                remote_token = await asyncio.to_thread(
-                    repair_agent_auth_via_ssh,
-                    host=node.host,
-                    ssh_port=node.ssh_port,
-                    username=node.ssh_user,
-                    auth_type=node.auth_type,
-                    password=password,
-                    private_key=private_key,
-                    agent_port=node.agent_port or AGENT_PORT_DEFAULT,
-                )
-                # Own session — gather() must not commit the shared request session.
-                async with SessionLocal() as sync_db:
-                    row = await sync_db.get(Node, node.id)
-                    if row:
-                        row.agent_token_enc = encrypt_secret(remote_token)
-                        await sync_db.commit()
-                clear_agent_status_cache(node_id)
-                st = await fetch_agent_status(
-                    host=node.host,
-                    token=remote_token,
-                    agent_port=node.agent_port,
-                    node_id=node_id,
-                )
-                if is_token_mismatch(st):
-                    st.error = (
-                        "Токен с VPS прочитан и агент перезапущен, но /metrics "
-                        "всё ещё отклоняет запрос — переустановите агент"
-                    )
-            except TokenSyncError as exc:
-                st.error = (
-                    f"Токен не совпадает; автосинхронизация по SSH не удалась: {exc.message}"
-                )
-            except Exception as exc:  # noqa: BLE001
-                st.error = (
-                    f"Токен не совпадает; автосинхронизация по SSH не удалась: {exc}"
-                )
+    async with SessionLocal() as check_db:
+        enabled = (await check_db.execute(select(Node.monitoring_enabled).where(Node.id == node.id))).scalar_one_or_none()
+    if not enabled:
+        clear_agent_status_cache(node_id)
+        return node_id, AgentNodeStatus(present=False, configured=bool(node.agent_token_enc), error="Мониторинг отключён")
 
+    if is_token_mismatch(st):
+        from app.services.monitoring_gate import monitoring_lock
+        async with monitoring_lock:
+            async with SessionLocal() as check_db:
+                enabled = (await check_db.execute(select(Node.monitoring_enabled).where(Node.id == node.id))).scalar_one_or_none()
+            if not enabled:
+                clear_agent_status_cache(node_id)
+                return node_id, AgentNodeStatus(present=False, configured=bool(node.agent_token_enc), error="Мониторинг отключён")
+            now = asyncio.get_running_loop().time()
+            last = _token_sync_last_try.get(node_id, 0.0)
+            if now - last >= _TOKEN_SYNC_COOLDOWN_SEC:
+                _token_sync_last_try[node_id] = now
+                password = decrypt_secret(node.password_enc) if node.password_enc else None
+                private_key = (
+                    decrypt_secret(node.private_key_enc) if node.private_key_enc else None
+                )
+                try:
+                    remote_token = await asyncio.to_thread(
+                        repair_agent_auth_via_ssh,
+                        host=node.host,
+                        ssh_port=node.ssh_port,
+                        username=node.ssh_user,
+                        auth_type=node.auth_type,
+                        password=password,
+                        private_key=private_key,
+                        agent_port=node.agent_port or AGENT_PORT_DEFAULT,
+                    )
+                    # Own session — gather() must not commit the shared request session.
+                    async with SessionLocal() as sync_db:
+                        row = await sync_db.get(Node, node.id)
+                        if row:
+                            row.agent_token_enc = encrypt_secret(remote_token)
+                            await sync_db.commit()
+                    clear_agent_status_cache(node_id)
+                    st = await fetch_agent_status(
+                        host=node.host,
+                        token=remote_token,
+                        agent_port=node.agent_port,
+                        node_id=node_id,
+                    )
+                    if is_token_mismatch(st):
+                        st.error = (
+                            "Токен с VPS прочитан и агент перезапущен, но /metrics "
+                            "всё ещё отклоняет запрос — переустановите агент"
+                        )
+                except TokenSyncError as exc:
+                    st.error = (
+                        f"Токен не совпадает; автосинхронизация по SSH не удалась: {exc.message}"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.error = (
+                        f"Токен не совпадает; автосинхронизация по SSH не удалась: {exc}"
+                    )
     hosting_bw = node.hosting.bandwidth_mbps if node.hosting is not None else None
     online = (online_by_address or {}).get(node.host)
     return node_id, _status_to_schema(st, hosting_bw, online)
@@ -334,7 +351,7 @@ async def nodes_agents(
     by_address = await asyncio.to_thread(rw_users_online_by_address)
     pairs = await asyncio.gather(*(_probe_one_node(n, by_address) for n in nodes))
     xray_online = {
-        str(n.id): by_address[n.host] for n in nodes if n.host in by_address
+        str(n.id): by_address[n.host] for n in nodes if n.monitoring_enabled and n.host in by_address
     }
 
     return NodesAgentResponse(
@@ -387,7 +404,7 @@ async def nodes_agents_stream(
                         "xray_online": {
                             str(n.id): by_address[n.host]
                             for n in nodes
-                            if n.host in by_address
+                            if n.monitoring_enabled and n.host in by_address
                         },
                     },
                     ensure_ascii=False,
@@ -480,6 +497,14 @@ async def update_node(
     _: str = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> NodeOut:
+    if body.monitoring_enabled is not None:
+        from app.services.monitoring_gate import monitoring_lock
+        async with monitoring_lock:
+            return await _update_node(node_id, body, db)
+    return await _update_node(node_id, body, db)
+
+
+async def _update_node(node_id: uuid.UUID, body: NodeUpdate, db: AsyncSession) -> NodeOut:
     node = await db.get(Node, node_id)
     if not node:
         raise HTTPException(status_code=404, detail="Нода не найдена")
@@ -506,6 +531,8 @@ async def update_node(
         node.country_code = data["country_code"].upper().strip() if data["country_code"] else None
     if "notes" in data:
         node.notes = data["notes"]
+    if data.get("monitoring_enabled") is not None:
+        node.monitoring_enabled = data["monitoring_enabled"]
 
     # Secrets: empty / omitted fields must NOT wipe stored credentials.
     # Clear only via explicit clear_password / clear_private_key.
@@ -530,6 +557,12 @@ async def update_node(
         raise HTTPException(status_code=400, detail="Для типа private_key нужен приватный ключ")
 
     await db.commit()
+    if "monitoring_enabled" in data:
+        from app.services.monitoring_gate import invalidate
+        invalidate()
+        clear_agent_status_cache(str(node.id))
+        from app.services.metrics_sampler import forget_node_counters
+        forget_node_counters(str(node.id))
     return _to_out(await _get_node(db, node_id))
 
 
@@ -1332,6 +1365,8 @@ async def get_node_haproxy_stats(
     node = await db.get(Node, node_id)
     if not node:
         raise HTTPException(status_code=404, detail="Нода не найдена")
+    if not node.monitoring_enabled:
+        raise HTTPException(status_code=409, detail="Мониторинг ноды отключён")
     password = decrypt_secret(node.password_enc) if node.password_enc else None
     private_key = decrypt_secret(node.private_key_enc) if node.private_key_enc else None
     stats = await asyncio.to_thread(

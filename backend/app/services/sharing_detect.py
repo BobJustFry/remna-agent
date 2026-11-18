@@ -543,6 +543,9 @@ def scan_once(
     agent_nodes: list[tuple[str, str, str]],
     cfg: dict | None = None,
     profiles: dict[int, tuple[float, int]] | None = None,
+    disabled_hosts: set[str] | None = None,
+    all_own_hosts: set[str] | None = None,
+    is_current=None,
 ) -> dict[str, Any]:
     """agent_nodes: (agent_id, name, host). Sync — вызывать из to_thread.
 
@@ -551,6 +554,7 @@ def scan_once(
     """
     cfg = {**sharing_score.DEFAULTS, **(cfg or {})}
     profiles = profiles or {}
+    disabled_hosts = disabled_hosts or set()
     try:
         rw = rw_nodes()
     except RemnawaveApiError as exc:
@@ -568,6 +572,8 @@ def scan_once(
     jobs: list[tuple[str, str, str]] = []
     addr_by_uuid: dict[str, str] = {}
     for n in rw:
+        if is_current is not None and not is_current():
+            return {"discarded": True}
         if not isinstance(n, dict) or n.get("isDisabled"):
             continue
         uuid = n.get("uuid")
@@ -575,6 +581,8 @@ def scan_once(
             continue
         name = n.get("name") or uuid
         addr_by_uuid[str(uuid)] = str(n.get("address") or "")
+        if str(n.get("address") or "") in disabled_hosts:
+            continue
         job = _try_api(f"/api/connections/by-node/{uuid}", "POST", {})
         jid = _job_id(job)
         if not jid:
@@ -590,6 +598,7 @@ def scan_once(
     # through the tunnel. They are not the subscriber's networks.
     own_ips = {a for a in addr_by_uuid.values() if a}
     own_ips.update(h for _, _, h in agent_nodes if h)
+    own_ips.update(all_own_hosts or set())
     stats = _collect_stats(node_results, own_ips)
 
     # Служебные пользователи-хопы шарингом не считаются: это наши же туннели.

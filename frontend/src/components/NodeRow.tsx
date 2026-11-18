@@ -26,6 +26,8 @@ type Props = {
   onSelectChange: (nodeId: string, selected: boolean) => void;
   installJob?: InstallJob;
   onEdit: (node: NodeItem) => void;
+  onToggleMonitoring: (node: NodeItem) => void;
+  monitoringBusy?: boolean;
   onDelete: (node: NodeItem) => void;
   onInstallAgent: (node: NodeItem) => void;
   onReboot: (node: NodeItem) => void;
@@ -59,6 +61,8 @@ export const NodeRow = memo(function NodeRow({
   onSelectChange,
   installJob,
   onEdit,
+  onToggleMonitoring,
+  monitoringBusy,
   onDelete,
   onInstallAgent,
   onReboot,
@@ -151,6 +155,14 @@ export const NodeRow = memo(function NodeRow({
               }}
             >
               Редактировать
+            </button>
+            <button
+              type="button"
+              className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--accent-dim)] disabled:opacity-50"
+              disabled={monitoringBusy}
+              onClick={() => { setMenuOpen(false); onToggleMonitoring(node); }}
+            >
+              {node.monitoring_enabled ? "Отключить мониторинг" : "Включить мониторинг"}
             </button>
             <button
               type="button"
@@ -418,6 +430,7 @@ export const NodeRow = memo(function NodeRow({
   );
 
   const agentBlock = (
+    !node.monitoring_enabled ? <span className="text-xs text-[var(--muted)]">—</span> :
     <AgentCell
       node={node}
       agent={agent}
@@ -444,7 +457,7 @@ export const NodeRow = memo(function NodeRow({
         ].join(" ")}
       >
         {checkbox}
-        <OnlineBadge status={status} compact={compact} />
+        {node.monitoring_enabled ? <OnlineBadge status={status} compact={compact} /> : <span className="text-xs text-[var(--muted)]">Мониторинг выкл.</span>}
 
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
@@ -516,7 +529,7 @@ export const NodeRow = memo(function NodeRow({
           ].join(" ")}
         >
           {checkbox}
-          <OnlineBadge status={status} compact />
+          {node.monitoring_enabled ? <OnlineBadge status={status} compact /> : <span className="text-xs text-[var(--muted)]">Мониторинг выкл.</span>}
           {node.country_code && <CountryFlag code={node.country_code} size={12} />}
           <div className="min-w-0 flex-1">
             <div className="truncate text-xs font-medium text-[var(--text)]">{node.name}</div>
@@ -539,7 +552,7 @@ export const NodeRow = memo(function NodeRow({
               <div className="pt-1">{checkbox}</div>
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <OnlineBadge status={status} />
+                  {node.monitoring_enabled ? <OnlineBadge status={status} /> : <span className="text-xs text-[var(--muted)]">Мониторинг выкл.</span>}
                   {node.country_code && <CountryFlag code={node.country_code} size={14} />}
                   <div className="truncate font-medium text-[var(--text)]">{node.name}</div>
                   <DownSince down={down} />

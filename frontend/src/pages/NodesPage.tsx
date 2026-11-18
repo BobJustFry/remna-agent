@@ -67,6 +67,7 @@ export function NodesPage() {
   const [error, setError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<NodeItem | null>(null);
+  const [monitoringBusyId, setMonitoringBusyId] = useState<string | null>(null);
   const [formBusy, setFormBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -124,6 +125,7 @@ export function NodesPage() {
       if (hostQ && !n.host.toLowerCase().includes(hostQ)) return false;
 
       if (onlineFilter !== "all") {
+        if (!n.monitoring_enabled) return false;
         const st = statuses[n.id];
         if (onlineFilter === "pending" && st) return false;
         if (onlineFilter === "online" && !st?.online) return false;
@@ -256,6 +258,19 @@ export function NodesPage() {
       setFormError(err instanceof Error ? err.message : "Ошибка сохранения");
     } finally {
       setFormBusy(false);
+    }
+  }
+
+  async function toggleMonitoring(node: NodeItem) {
+    setMonitoringBusyId(node.id);
+    setError(null);
+    try {
+      const updated = await api.setNodeMonitoring(node.id, !node.monitoring_enabled);
+      setNodes((prev) => prev.map((n) => n.id === updated.id ? updated : n));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось изменить мониторинг");
+    } finally {
+      setMonitoringBusyId(null);
     }
   }
 
@@ -728,6 +743,8 @@ export function NodesPage() {
                 setFormOpen(true);
               }}
               onDelete={(n) => setPendingDelete(n)}
+              onToggleMonitoring={toggleMonitoring}
+              monitoringBusy={monitoringBusyId === node.id}
               onInstallAgent={(n) =>
                 setConfirmInstall({
                   nodes: [n],

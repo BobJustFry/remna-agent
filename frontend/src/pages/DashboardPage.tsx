@@ -86,6 +86,7 @@ export function DashboardPage() {
   const haproxyNodes = useMemo(
     () =>
       nodes.filter((n) => {
+        if (!n.monitoring_enabled) return false;
         const agent = agentStatuses[n.id];
         return agent?.haproxy_present === true || /haproxy/i.test(n.name);
       }),
@@ -153,7 +154,7 @@ export function DashboardPage() {
   const stats = useMemo(
     () =>
       computeStats(
-        nodes,
+        nodes.filter((node) => node.monitoring_enabled),
         statuses,
         agentStatuses,
         hostings.length,

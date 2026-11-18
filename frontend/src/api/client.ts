@@ -93,6 +93,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(toPayload(values, false)),
     }),
+  setNodeMonitoring: (id: string, enabled: boolean) =>
+    request<NodeItem>(`/api/nodes/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ monitoring_enabled: enabled }),
+    }),
   deleteNode: (id: string) => request<void>(`/api/nodes/${id}`, { method: "DELETE" }),
   getSecret: (id: string) =>
     request<{ auth_type: AuthType; secret: string }>(`/api/nodes/${id}/secret`),

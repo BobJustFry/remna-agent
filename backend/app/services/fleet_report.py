@@ -785,7 +785,7 @@ async def load_snapshot(db: AsyncSession, cfg: dict, state: dict | None = None,
         off = int(cfg["utc_offset"])
         days = int(cfg["window_days"])
         since = now - timedelta(days=days)
-        nodes = list((await db.execute(select(Node).options(selectinload(Node.hosting)))).scalars().all())
+        nodes = list((await db.execute(select(Node).options(selectinload(Node.hosting)).where(Node.monitoring_enabled.is_(True)))).scalars().all())
         daily = (await db.execute(_DAILY_SQL, {"since": since, "off": off})).all()
         overall = {str(r[0]): r for r in (await db.execute(_OVERALL_SQL, {"since": since})).all()}
         latest = {str(r[0]): r for r in

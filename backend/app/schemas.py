@@ -76,6 +76,7 @@ class NodeUpdate(BaseModel):
     clear_hosting: bool = False
     country_code: str | None = Field(default=None, max_length=8)
     notes: str | None = None
+    monitoring_enabled: bool | None = None
 
 
 class NodeOut(BaseModel):
@@ -97,6 +98,7 @@ class NodeOut(BaseModel):
     notes: str | None
     agent_configured: bool
     agent_port: int
+    monitoring_enabled: bool = True
     created_at: datetime
     updated_at: datetime
 

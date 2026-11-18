@@ -29,6 +29,7 @@ export type NodeItem = {
   notes: string | null;
   agent_configured: boolean;
   agent_port: number;
+  monitoring_enabled: boolean;
   created_at: string;
   updated_at: string;
 };

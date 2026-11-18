@@ -587,7 +587,8 @@ def _priority(obs: Obs, st: dict) -> tuple:
 
 
 async def tick(db: AsyncSession, cfg: dict, observations: list[Obs],
-               nodes_by_id: dict | None = None, now: datetime | None = None) -> list[dict]:
+               nodes_by_id: dict | None = None, now: datetime | None = None,
+               existing_ids: set[str] | None = None) -> list[dict]:
     """Один проход: тревоги, решения, (при боевом режиме) один перезапуск.
 
     Возвращает записи журнала — тесты и ручной прогон видят решение, ничего
@@ -605,9 +606,18 @@ async def tick(db: AsyncSession, cfg: dict, observations: list[Obs],
         to_notify: list[tuple[dict, str]] = []
 
         # Забытые ноды (удалены из рагента) убираем.
-        live = {o.node_id for o in observations}
+        active = {o.node_id for o in observations}
+        live = active if existing_ids is None else existing_ids
         for gone in [k for k in nodes_state if k not in live]:
             nodes_state.pop(gone, None)
+        for paused in live - active:
+            if paused in nodes_state:
+                st = nodes_state[paused]
+                for key in ("bad", "ok"):
+                    st[key] = 0
+                for key in ("alarm", "last", "decision", "dry_key", "probe_at", "oom_until"):
+                    st[key] = {} if key == "last" else None
+                st.pop("probe", None)
 
         verdicts: dict[str, Verdict | None] = {}
         for obs in observations:
@@ -647,7 +657,7 @@ async def tick(db: AsyncSession, cfg: dict, observations: list[Obs],
         # Решения.
         fleet = FleetCtx(
             restarts=restarts,
-            pending_nodes=[k for k, s in nodes_state.items() if s.get("pending")],
+            pending_nodes=[k for k, s in nodes_state.items() if k in active and s.get("pending")],
         )
         candidates: list[tuple[Obs, dict, Decision]] = []
         by_id = {o.node_id: o for o in observations}
@@ -810,9 +820,10 @@ async def observe(db: AsyncSession, nodes: list, agents: dict, answered: dict,
     obs_list = []
     for n in nodes:
         nid = str(n.id)
-        if not n.agent_token_enc:
+        if not getattr(n, "monitoring_enabled", True) or not n.agent_token_enc:
             continue
         ans = answered.get(nid)
         ok = bool(ans[0]) if isinstance(ans, tuple) else bool(ans)
         obs_list.append(build_obs(n, agents.get(nid), panel.get(n.host), (deltas.get(nid) or {}).get("oom_kills"), ok))
-    return await tick(db, cfg, obs_list, {str(n.id): n for n in nodes})
+    return await tick(db, cfg, obs_list, {str(n.id): n for n in nodes},
+                      existing_ids={str(n.id) for n in nodes})
